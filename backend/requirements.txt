@@ -1,0 +1,12 @@
+# Python AI Module dependencies
+# No external packages required - uses only stdlib
+# The AI module is built on pure Python dataclasses
+#
+# Optional (for production HTTP serving):
+# flask>=3.0
+# gunicorn>=21.2
+#
+# To run the AI module server:
+#   python ai-server.py
+#
+# The server uses Python's built-in http.server (no pip install needed)

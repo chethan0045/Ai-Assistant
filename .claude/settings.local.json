@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx ng:*)",
+      "Bash(npm install:*)",
+      "Bash(node -c terminal-server.js)",
+      "Bash(timeout 3 node terminal-server.js)",
+      "Bash(node:*)",
+      "Bash(taskkill /F /IM node.exe)",
+      "Bash(curl:*)",
+      "Bash(ls:*)",
+      "Bash(cmd.exe /c \"set NODE_ENV=qa && node -e \\\\\"console.log\\('NODE_ENV:', process.env.NODE_ENV\\)\\\\\"\")",
+      "Read(//c/Users/c6191/AppData/Local/Temp/claude/C--AI/19c671e4-6d1d-4675-a0a6-50f8097187fb/tasks/**)",
+      "Bash(where ollama:*)",
+      "Bash(ollama list:*)",
+      "Bash(netstat -ano)",
+      "Bash(findstr :4100)",
+      "Bash(rm -rf /c/Users/c6191/Desktop/test-angular)",
+      "Bash(mkdir /c/Users/c6191/Desktop/test-angular)"
+    ]
+  }
+}
