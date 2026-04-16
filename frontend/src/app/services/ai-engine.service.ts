@@ -81,7 +81,7 @@ export class AIEngineService {
   readonly streamingText = signal('');
   readonly streamingId = signal('');
   readonly aiModuleAvailable = signal(false);
-  readonly activeProvider = signal<'local' | 'ai-module' | 'deepseek'>('local');
+  readonly activeProvider = signal<'local'>('local');
 
   private scanner: ProjectScannerService | null = null;
   private analysis: ProjectAnalysis | null = null;
@@ -119,7 +119,7 @@ export class AIEngineService {
   /**
    * Switch the active AI provider.
    */
-  setProvider(provider: 'local' | 'ai-module' | 'deepseek'): void {
+  setProvider(provider: 'local'): void {
     this.activeProvider.set(provider);
   }
 
@@ -151,15 +151,8 @@ export class AIEngineService {
       const cmd = input.toLowerCase();
       let response: ChatMessage;
 
-      if ((this.activeProvider() === 'ai-module' && this.aiModuleAvailable()) ||
-          cmd.startsWith('/ai ') || cmd.includes('ai module') ||
-          cmd.includes('cost estimate') || cmd.includes('token usage') ||
-          cmd.includes('list models') || cmd.includes('model info')) {
-        response = await this.cmdAIModule(input, report, currentFile);
-      } else {
-        const result = this.processCommand(input, report, currentFile);
-        response = result instanceof Promise ? await result : result;
-      }
+      const result = this.processCommand(input, report, currentFile);
+      response = result instanceof Promise ? await result : result;
 
       // Stream the text character by character
       await this.streamText(response.text, msgId);
@@ -2454,7 +2447,7 @@ app.listen(process.env.PORT || 3000, () => {
         const estimate = await this.aiModule.estimateCost({
           input_tokens: report.totalLines * 4,
           output_tokens: Math.floor(report.totalLines * 2),
-          model: 'claude-sonnet-4-6',
+          model: 'local',
         });
         let text = `**Cost Estimate for Project Analysis**\n\n`;
         text += `- **Total Tokens:** ${estimate.total_tokens.toLocaleString()}\n`;

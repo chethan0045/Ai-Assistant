@@ -1313,96 +1313,27 @@ router.delete('/:id', async (req, res) => {
 module.exports = router;`;
 }
 
-// ===== PYTHON AI MODULE PROXY =====
-const AI_MODULE_PORT = process.env.AI_MODULE_PORT || 5100;
+// ===== AI MODULE (disabled — no external AI providers) =====
+// Python AI module proxy removed: it connected to Anthropic, OpenAI, xAI, DashScope.
+// All AI features now run locally via the knowledge base.
+app.all('/api/ai-module/*', (req, res) => {
+  res.json({ error: 'External AI module disabled. Assistant runs independently using local knowledge base.' });
+});
 
-function proxyToAIModule(req, res, method = 'GET') {
-  const targetPath = req.url.replace('/api/ai-module', '/api/ai-module');
-  const options = {
-    hostname: 'localhost',
-    port: AI_MODULE_PORT,
-    path: targetPath,
-    method,
-    headers: { 'Content-Type': 'application/json' },
-  };
-
-  const proxyReq = http.request(options, (proxyRes) => {
-    // Handle SSE streaming
-    if (proxyRes.headers['content-type']?.includes('text/event-stream')) {
-      res.writeHead(200, {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-        'Connection': 'keep-alive',
-        'Access-Control-Allow-Origin': '*',
-      });
-      proxyRes.pipe(res);
-      return;
-    }
-
-    let data = '';
-    proxyRes.on('data', chunk => data += chunk);
-    proxyRes.on('end', () => {
-      try {
-        res.status(proxyRes.statusCode || 200).json(JSON.parse(data));
-      } catch {
-        res.status(proxyRes.statusCode || 200).send(data);
-      }
-    });
-  });
-
-  proxyReq.on('error', (err) => {
-    res.status(502).json({
-      error: `AI Module not reachable at localhost:${AI_MODULE_PORT}. Start it with: python ai-server.py`,
-      detail: err.message,
-    });
-  });
-
-  if (method === 'POST' && req.body) {
-    proxyReq.write(JSON.stringify(req.body));
-  }
-  proxyReq.end();
-}
-
-// AI Module proxy — GET routes
-app.get('/api/ai-module/status', (req, res) => proxyToAIModule(req, res, 'GET'));
-app.get('/api/ai-module/models', (req, res) => proxyToAIModule(req, res, 'GET'));
-app.get('/api/ai-module/models/:alias', (req, res) => proxyToAIModule(req, res, 'GET'));
-app.get('/api/ai-module/session/:id', (req, res) => proxyToAIModule(req, res, 'GET'));
-app.get('/api/ai-module/cache/stats', (req, res) => proxyToAIModule(req, res, 'GET'));
-
-// AI Module proxy — POST routes
-app.post('/api/ai-module/session', (req, res) => proxyToAIModule(req, res, 'POST'));
-app.post('/api/ai-module/session/:id/message', (req, res) => proxyToAIModule(req, res, 'POST'));
-app.post('/api/ai-module/session/:id/stream', (req, res) => proxyToAIModule(req, res, 'POST'));
-app.post('/api/ai-module/prompt/build', (req, res) => proxyToAIModule(req, res, 'POST'));
-app.post('/api/ai-module/usage/estimate', (req, res) => proxyToAIModule(req, res, 'POST'));
-app.post('/api/ai-module/analyze', (req, res) => proxyToAIModule(req, res, 'POST'));
-
-// ===== DEEPSEEK AI =====
-const { CloudAIService } = require('./cloud-ai.service');
-const deepseekAI = new CloudAIService();
+// ===== AI (local only — no external providers) =====
 try { require('dotenv').config(); } catch {}
-if (process.env.DEEPSEEK_API_KEY) deepseekAI.setApiKey(process.env.DEEPSEEK_API_KEY);
 
-app.get('/api/ai/status', (req, res) => res.json(deepseekAI.getStatus()));
+app.get('/api/ai/status', (req, res) => res.json({ provider: 'local', ready: true }));
 
 app.post('/api/ai/key', (req, res) => {
-  const { key } = req.body;
-  if (!key) return res.status(400).json({ error: 'key required' });
-  deepseekAI.setApiKey(key);
-  res.json({ success: true });
+  res.json({ success: true, note: 'External AI providers removed — assistant runs locally' });
 });
 
 app.post('/api/ai/chat/stream', async (req, res) => {
-  const { messages, model, projectContext, currentFile, conversationHistory, userInput } = req.body;
   res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive', 'Access-Control-Allow-Origin': '*' });
-  try {
-    const chatMessages = messages || deepseekAI.buildMessages(userInput || '', projectContext || '', conversationHistory || [], currentFile);
-    await deepseekAI.streamChat(chatMessages, model, res);
-  } catch (err) {
-    res.write(`data: ${JSON.stringify({ error: err.message })}\n\n`);
-    res.end();
-  }
+  res.write(`data: ${JSON.stringify({ token: 'AI runs locally via the knowledge base. No external API is used.' })}\n\n`);
+  res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
+  res.end();
 });
 
 // REST: health check
