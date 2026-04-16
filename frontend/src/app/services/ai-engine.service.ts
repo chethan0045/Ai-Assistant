@@ -7,6 +7,7 @@ import { FileSystemService } from './file-system.service';
 import { KnowledgeApiService } from './knowledge-api.service';
 import { AlgorithmsService } from './algorithms.service';
 import { EnhancementsService } from './enhancements.service';
+import { LeetcodeService, LeetProblem } from './leetcode.service';
 
 // ===== TYPES =====
 
@@ -90,6 +91,7 @@ export class AIEngineService {
   private kbApi = inject(KnowledgeApiService);
   private algos = inject(AlgorithmsService);
   private enhancements = inject(EnhancementsService);
+  private leetcode = inject(LeetcodeService);
   private aiSessionId: string | null = null;
   private idCounter = 0;
   private id(): string { return 'ai_' + (++this.idCounter); }
@@ -198,11 +200,25 @@ export class AIEngineService {
       return this.cmdRunCode(input);
     }
 
-    // Enhancement request — "add X feature", "make it so Y", "enhance with Z", "improve this to do X"
-    const isEnhancement = /\b(add(\s|ing)?|enhance|improve|include|make it|make the|make this|modify|change|update|extend)\b.*\b(feature|functionality|support|so that|to do|to have|detection|dialog|option|ability)\b/i.test(cmd)
+    // Enhancement request — detected via several patterns:
+    const isEnhancement = report?.files && report.files.length > 0 && (
+      /\b(add(\s|ing)?|enhance|improve|include|make it|make the|make this|modify|change|update|extend)\b.*\b(feature|functionality|support|so that|to do|to have|detection|dialog|option|ability)\b/i.test(cmd)
       || /\benhancement\b/i.test(cmd)
-      || /make.*(game|app|code|project).*\b(happens?|work|detect|supports?)\b/i.test(cmd);
-    if (isEnhancement && report?.files && report.files.length > 0) {
+      || /make.*(game|app|code|project).*\b(happens?|work|detect|supports?)\b/i.test(cmd)
+      || /\bwhen\b.*\bneed\s*to\b/i.test(cmd)
+      || /\bwhen\b.*\bshould\b/i.test(cmd)
+      || /\bwhen\b.*(notif|show|display|alert|end|stop|give|choose|select)/i.test(cmd)
+      || /\bneed\s*to\s+(give|show|notify|display|add|have|detect|end|stop|alert|support|handle)/i.test(cmd)
+      || /\b(check\s*mate|checkmate|promoted?|promotion|game\s*(is\s*)?over|king.*captur|check.*given)/i.test(cmd)
+      || /\bcode\s+(updat|chang|editi?).*\bnot\b/i.test(cmd)
+      || /\btrain\s*(ai|module|model)|\bai\s+need\s+to\s+(edit|modify|update|fix|change)|\bedit\s+project\b/i.test(cmd)
+      // NEW — styling / appearance requests
+      || /\b(change|update|modify|customize|restyle|improve|redesign|change)\s+(the\s+)?.*\b(style|styling|look|appearance|color|colors|design|theme|ui|background|banner)\b/i.test(cmd)
+      || /\b(style|look|appearance|design|banner)\s+(of|for)\s+/i.test(cmd)
+      || /\bmake\s+.*\b(bigger|smaller|prettier|nicer|better|prominent|bold|colorful)\b/i.test(cmd)
+      || /\b(change|update|restyle|customize)\s+(the\s+)?(check|checkmate|promotion|game\s*over|turn)\s+(notif|banner|alert|popup|dialog|message|display|style)/i.test(cmd)
+    );
+    if (isEnhancement) {
       return this.cmdEnhanceProject(input, report);
     }
 
@@ -211,6 +227,38 @@ export class AIEngineService {
     if (isBugReport && report?.files && report.files.length > 0) {
       return this.cmdFixProjectBug(input, report, currentFile);
     }
+
+    // Arithmetic — "98 * 23", "98 multiplied by 23", "(5+3)/2", "sqrt(144)"
+    const mathResult = this.tryMath(input);
+    if (mathResult) return mathResult;
+
+    // Coding problem — LeetCode-style statements like "Given nums1 and nums2 ... return the median"
+    // Fast path: in-memory first
+    const localProblem = this.leetcode.detect(input);
+    if (localProblem) return this.cmdLeetProblem(localProblem);
+    // Slow path: check MongoDB for Blind 75 / NeetCode 150 if it looks like a problem
+    if (this.leetcode.isProblemStatement(input)) {
+      return this.leetcode.detectExtended(input).then(p => {
+        if (p) return this.cmdLeetProblem(p);
+        // No match in MongoDB either — show available
+        const known = this.leetcode.list().map(p2 =>
+          `- **#${p2.number}** ${p2.title} (${p2.difficulty})`
+        ).join('\n');
+        return {
+          id: '', role: 'ai', timestamp: new Date(),
+          text: `## Coding Problem Detected\n\nI recognize this as a coding problem, but it's not in my library yet.\n\n**Problems I can solve** (showing in-memory; MongoDB adds 30+ more):\n${known}\n\nTry another problem or describe your algorithm needs more specifically.`,
+          steps: [
+            { label: 'Detected problem statement', status: 'done', detail: 'no exact match' },
+            { label: 'Checked in-memory', status: 'done', detail: `${this.leetcode.list().length} problems` },
+            { label: 'Checked MongoDB', status: 'done', detail: 'no match' },
+          ],
+        } as ChatMessage;
+      });
+    }
+    // Compute algorithm result — "fibonacci series of 15", "factorial of 10", "primes up to 50"
+    // Detects algorithm name + number, returns actual computed output
+    const computeResult = this.tryCompute(input);
+    if (computeResult) return computeResult;
 
     // Algorithm/snippet generation — "create/write/generate code for fibonacci/factorial/etc."
     // This must run BEFORE project-specific commands so "create fibonacci" doesn't hit cmdGenerateCode (which edits files)
@@ -250,22 +298,28 @@ export class AIEngineService {
     if ((cmd.includes('test case') || cmd.includes('generate test')) && report.totalFiles > 0) {
       return this.cmdGenerateTests(report, currentFile);
     }
-    if (cmd.includes('explain') && (cmd.includes('project') || cmd.includes('structure')) && report.totalFiles > 0) {
+    // Use word-boundary regex so "whether" doesn't match "where", "finding" doesn't match "find" blindly, etc.
+    const hasWord = (w: string) => new RegExp(`\\b${w}\\b`, 'i').test(cmd);
+    const hasAnyWord = (...ws: string[]) => ws.some(w => hasWord(w));
+
+    if (hasWord('explain') && (hasWord('project') || hasWord('structure')) && report.totalFiles > 0) {
       return this.cmdExplainProject(report);
     }
-    if ((cmd.includes('explain') || cmd.includes('what does')) && currentFile && cmd.includes('file')) {
+    if ((hasWord('explain') || /\bwhat\s+does\b/i.test(cmd)) && currentFile && hasWord('file')) {
       return this.cmdExplainFile(currentFile, report);
     }
-    if (cmd.includes('fix') || cmd.includes('debug') || cmd.includes('error') || cmd.includes('bug')) {
+    if (hasAnyWord('fix', 'debug', 'error', 'bug', 'bugs')) {
       if (currentFile) return this.cmdFixCode(input, report, currentFile);
     }
-    if (cmd.includes('build') || cmd.includes('create') || cmd.includes('generate') || cmd.includes('write')) {
-      if (report.totalFiles > 0) return this.cmdGenerateCode(input, report, currentFile);
+    if (hasAnyWord('build', 'create', 'generate', 'write') && hasAnyWord('component', 'service', 'module', 'page', 'form', 'api', 'endpoint', 'route', 'login', 'auth', 'crud')) {
+      return this.cmdGenerateCode(input, report, currentFile);
     }
-    if (cmd.includes('auto code') || cmd.includes('automation')) {
+    if (/\bauto\s*code\b/i.test(cmd) || hasWord('automation')) {
       return this.cmdAutoCode(report, currentFile);
     }
-    if (cmd.includes('find') || cmd.includes('search') || cmd.includes('where')) {
+    // Search — requires explicit intent word AND doesn't look like a problem statement
+    const looksLikeProblem = /\bgiven\b.*\b(string|array|integer|input|pattern)\b/i.test(cmd);
+    if ((hasAnyWord('find', 'search') || /\bwhere\s+(is|are|can|does)\b/i.test(cmd)) && !looksLikeProblem) {
       if (report.totalFiles > 0) return this.cmdSearch(input, report);
     }
     if (cmd === 'help' || cmd === '/help') {
@@ -604,41 +658,164 @@ export class AIEngineService {
 
   // ===== GENERATE CODE =====
 
-  private cmdGenerateCode(input: string, report: ProjectReport, currentFile?: ProjectFile): ChatMessage {
+  private async cmdGenerateCode(input: string, report: ProjectReport, currentFile?: ProjectFile): Promise<ChatMessage> {
     const cmd = input.toLowerCase();
     const artifacts: Artifact[] = [];
     const steps: TaskStep[] = [{ label: 'Analyzing request', status: 'done' }];
+    let generatedFiles: { path: string; content: string }[] = [];
+
+    // Detect project structure from existing files to place generated files correctly
+    const paths = report.files.map(f => f.path);
+    const hasAngularSrcApp = paths.some(p => /\/src\/app\//.test(p));
+    const hasBackendDir = paths.some(p => /\/backend\//.test(p));
+    // Prefix for Angular components (e.g., "src/app/") and backend files (e.g., "backend/")
+    const fePrefix = hasAngularSrcApp ? 'src/app/' : '';
+    const bePrefix = hasBackendDir ? 'backend/' : '';
 
     if (cmd.includes('login') || cmd.includes('auth')) {
-      steps.push({ label: 'Generating auth system', status: 'done', detail: '4 files' });
-      artifacts.push({ id: this.id(), type: 'code', title: 'models/User.js', language: 'javascript', content: this.tplUserModel(), editable: true });
-      artifacts.push({ id: this.id(), type: 'code', title: 'routes/auth.js', language: 'javascript', content: this.tplAuthRoutes(), editable: true });
-      artifacts.push({ id: this.id(), type: 'code', title: 'middleware/auth.js', language: 'javascript', content: this.tplAuthMiddleware(), editable: true });
-      artifacts.push({ id: this.id(), type: 'code', title: 'login.component.ts', language: 'typescript', content: this.tplLoginComponent(), editable: true });
-      return { id: '', role: 'ai', text: `Generated **login/auth system** with 4 files:\n- User model\n- Auth routes (login + register)\n- JWT middleware\n- Login component`, timestamp: new Date(), steps, artifacts };
+      // Check if routing/config files already exist
+      const hasRoutes = paths.some(p => /app\.routes\.ts/.test(p));
+      const hasConfig = paths.some(p => /app\.config\.ts/.test(p));
+      const hasAuthService = paths.some(p => /auth\.service\.ts/.test(p));
+
+      // Detect existing app.component.ts to extract its class name for routing
+      const appCompFile = report.files.find(f => /app\.component\.ts$/.test(f.path));
+      const appCompClass = appCompFile?.content.match(/export\s+class\s+(\w+)/)?.[1] || 'AppComponent';
+
+      // Backend files
+      generatedFiles.push(
+        { path: `${bePrefix}models/User.js`, content: this.tplUserModel() },
+        { path: `${bePrefix}routes/auth.js`, content: this.tplAuthRoutes() },
+        { path: `${bePrefix}middleware/auth.js`, content: this.tplAuthMiddleware() },
+      );
+      // Frontend: auth service, guard, interceptor, login component, routing
+      if (!hasAuthService) {
+        generatedFiles.push({ path: `${fePrefix}services/auth.service.ts`, content: this.tplAuthService() });
+      }
+      generatedFiles.push(
+        { path: `${fePrefix}guards/auth.guard.ts`, content: this.tplAuthGuard() },
+        { path: `${fePrefix}interceptors/auth.interceptor.ts`, content: this.tplAuthInterceptor() },
+        { path: `${fePrefix}login/login.component.ts`, content: this.tplLoginComponent() },
+      );
+      if (!hasRoutes) {
+        generatedFiles.push({ path: `${fePrefix}app.routes.ts`, content: this.tplAppRoutes(appCompClass) });
+      }
+      if (!hasConfig) {
+        generatedFiles.push({ path: `${fePrefix}app.config.ts`, content: this.tplAppConfig() });
+      }
+
+      // Update main.ts to use appConfig so routing and HTTP interceptors work
+      const mainFile = report.files.find(f => /main\.ts$/.test(f.path));
+      if (mainFile && !mainFile.content.includes('appConfig')) {
+        generatedFiles.push({ path: 'src/main.ts', content: this.tplMainTs() });
+      }
+
+      // Create a root shell component with router-outlet that wraps the app
+      generatedFiles.push({ path: `${fePrefix}shell.component.ts`, content: this.tplShellComponent() });
+
+      steps.push({ label: 'Generating auth system', status: 'done', detail: `${generatedFiles.length} files` });
+      for (const f of generatedFiles) {
+        artifacts.push({ id: this.id(), type: 'code', title: f.path, language: f.path.endsWith('.ts') ? 'typescript' : 'javascript', content: f.content, editable: true, applied: true });
+      }
     }
 
-    const crudMatch = cmd.match(/(?:crud|api|rest)\s+(?:for\s+)?(\w+)/i) || cmd.match(/(\w+)\s+(?:crud|api|model)/i);
-    if (crudMatch) {
-      const name = crudMatch[1].charAt(0).toUpperCase() + crudMatch[1].slice(1);
-      steps.push({ label: `Generating CRUD for ${name}`, status: 'done', detail: '2 files' });
-      artifacts.push({ id: this.id(), type: 'code', title: `models/${name}.js`, language: 'javascript', content: this.tplModel(name), editable: true });
-      artifacts.push({ id: this.id(), type: 'code', title: `routes/${name.toLowerCase()}s.js`, language: 'javascript', content: this.tplCRUD(name), editable: true });
-      return { id: '', role: 'ai', text: `Generated **CRUD API** for **${name}**:\n- Mongoose model with timestamps\n- Express routes (GET, POST, PUT, DELETE)`, timestamp: new Date(), steps, artifacts };
+    if (generatedFiles.length === 0) {
+      const crudMatch = cmd.match(/(?:crud|api|rest)\s+(?:for\s+)?(\w+)/i) || cmd.match(/(\w+)\s+(?:crud|api|model)/i);
+      if (crudMatch) {
+        const name = crudMatch[1].charAt(0).toUpperCase() + crudMatch[1].slice(1);
+        generatedFiles = [
+          { path: `${bePrefix}models/${name}.js`, content: this.tplModel(name) },
+          { path: `${bePrefix}routes/${name.toLowerCase()}s.js`, content: this.tplCRUD(name) },
+        ];
+        steps.push({ label: `Generating CRUD for ${name}`, status: 'done', detail: '2 files' });
+        for (const f of generatedFiles) {
+          artifacts.push({ id: this.id(), type: 'code', title: f.path, language: 'javascript', content: f.content, editable: true, applied: true });
+        }
+      }
     }
 
-    const compMatch = cmd.match(/component\s+(?:for\s+|named?\s+)?(\w+)/i) || cmd.match(/(\w+)\s+component/i);
-    if (compMatch) {
-      const name = compMatch[1];
-      artifacts.push({ id: this.id(), type: 'code', title: `${name}.component.ts`, language: 'typescript', content: this.tplComponent(name), editable: true });
-      return { id: '', role: 'ai', text: `Generated Angular component **${name}**`, timestamp: new Date(), artifacts };
+    if (generatedFiles.length === 0) {
+      const compMatch = cmd.match(/component\s+(?:for\s+|named?\s+)?(\w+)/i) || cmd.match(/(\w+)\s+component/i);
+      if (compMatch) {
+        const name = compMatch[1];
+        generatedFiles = [
+          { path: `${fePrefix}${name}.component.ts`, content: this.tplComponent(name) },
+        ];
+        for (const f of generatedFiles) {
+          artifacts.push({ id: this.id(), type: 'code', title: f.path, language: 'typescript', content: f.content, editable: true, applied: true });
+        }
+      }
     }
 
-    if (currentFile) {
-      return this.cmdFixCode(input, report, currentFile);
+    if (generatedFiles.length === 0) {
+      if (currentFile) return this.cmdFixCode(input, report, currentFile);
+      return { id: '', role: 'ai', text: 'What would you like to generate?\n- `build login page`\n- `create CRUD for Product`\n- `generate dashboard component`', timestamp: new Date() };
     }
 
-    return { id: '', role: 'ai', text: 'What would you like to generate?\n- `build login page`\n- `create CRUD for Product`\n- `generate dashboard component`', timestamp: new Date() };
+    // Auto-create files in IDE tree and on disk (like project scaffolding does)
+    await this.autoCreateFiles(generatedFiles, report);
+
+    const fileList = generatedFiles.map(f => `- \`${f.path}\``).join('\n');
+    steps.push({ label: 'Creating folders & files', status: 'done', detail: `${generatedFiles.length} files` });
+
+    let text = `Generated **${generatedFiles.length} file${generatedFiles.length === 1 ? '' : 's'}** and added to project:\n${fileList}`;
+
+    // Enrich with knowledge base patterns if available
+    const kbResult = await this.kbApi.generateCode(input).catch(() => null);
+    if (kbResult?.code && kbResult.patterns_used.length > 0) {
+      steps.push({ label: 'Knowledge base patterns', status: 'done', detail: `${kbResult.patterns_used.length} patterns applied` });
+      text += `\n\n---\n**Knowledge base patterns used:**\n`;
+      text += kbResult.patterns_used.map(p => `- **${p.title}** (${p.category})`).join('\n');
+    }
+
+    return { id: '', role: 'ai', text, timestamp: new Date(), steps, artifacts };
+  }
+
+  /** Auto-create generated files: add to IDE tree + write to disk */
+  private async autoCreateFiles(files: { path: string; content: string }[], report: ProjectReport): Promise<void> {
+    const basePath = this.projectBasePath || this.scanner?.projectBasePath() || '';
+    const folderName = report?.tree?.name || 'project';
+
+    // 1. Add files to in-memory IDE tree via scanner
+    if (this.scanner) {
+      const patched = this.scanner.patchReport(folderName, files);
+      if (patched) {
+        this.scanner.report.set(patched);
+      }
+      // Auto-select the first generated file in the editor
+      const firstFilePath = folderName + '/' + files[0].path;
+      const matchFile = (patched || report).files.find(f => f.path === firstFilePath);
+      if (matchFile) {
+        this.scanner.selectedFilePath.set(matchFile.path);
+      }
+    }
+
+    // 2. Write to disk if base path is set
+    if (basePath) {
+      const sep = basePath.includes('\\') ? '\\' : '/';
+
+      // Collect unique parent folders and create them first
+      const folders = new Set<string>();
+      for (const f of files) {
+        const parts = f.path.split('/');
+        for (let i = 1; i <= parts.length - 1; i++) {
+          folders.add(parts.slice(0, i).join('/'));
+        }
+      }
+      // Create parent folders (sorted by depth so parents come first)
+      const sortedFolders = Array.from(folders).sort((a, b) => a.split('/').length - b.split('/').length);
+      for (const folder of sortedFolders) {
+        const fullFolder = basePath + sep + folder.replace(/\//g, sep);
+        await this.fs.createFolder(fullFolder);
+      }
+
+      // Write all files
+      const diskFiles = files.map(f => ({
+        path: basePath + sep + f.path.replace(/\//g, sep),
+        content: f.content,
+      }));
+      await this.fs.writeFiles(diskFiles);
+    }
   }
 
   // ===== AUTO CODE (test automation) =====
@@ -899,16 +1076,202 @@ export class AIEngineService {
 
   // ===== PROJECT ENHANCEMENT =====
 
+  /**
+   * Offer 4 CSS style variants for the check notification.
+   * User can copy any one and paste into their component's styles.
+   */
+  private cmdCheckNotificationStyles(cmd: string): ChatMessage {
+    let text = `## 🎨 Check Notification Style Variants\n\n`;
+    text += `Pick a style, copy the CSS, and paste it into your chess component's \`styles\` array (replacing the existing \`.message.check\` and \`.message.checkmate\` rules).\n\n`;
+
+    text += `### 1. Banner — Full-width with icon (prominent)\n`;
+    text += '```css\n';
+    text += `.message.check {
+  background: linear-gradient(135deg, #f59e0b, #ef4444);
+  color: #fff;
+  font-weight: 800;
+  font-size: 15px;
+  padding: 14px 20px;
+  border-radius: 0;
+  margin: 0 -32px 12px;
+  text-align: center;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  box-shadow: 0 4px 20px rgba(239, 68, 68, 0.5);
+  animation: slideIn 0.4s ease-out;
+}
+.message.check::before {
+  content: '⚠️ ';
+  font-size: 18px;
+}
+.message.checkmate {
+  background: linear-gradient(135deg, #dc2626, #7f1d1d);
+  color: #fff;
+  font-size: 20px;
+  font-weight: 900;
+  padding: 20px;
+  text-align: center;
+  text-transform: uppercase;
+  letter-spacing: 2px;
+  box-shadow: 0 8px 30px rgba(220, 38, 38, 0.6);
+}
+@keyframes slideIn {
+  from { transform: translateY(-100%); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}\n`;
+    text += '```\n\n';
+
+    text += `### 2. Neon Glow — Pulsing red border\n`;
+    text += '```css\n';
+    text += `.message.check {
+  background: #000;
+  color: #ef4444;
+  font-weight: 700;
+  font-size: 14px;
+  padding: 12px 16px;
+  border-radius: 8px;
+  border: 2px solid #ef4444;
+  text-align: center;
+  text-transform: uppercase;
+  letter-spacing: 2px;
+  animation: neon-pulse 1.2s ease-in-out infinite;
+  text-shadow: 0 0 10px #ef4444;
+}
+.message.checkmate {
+  background: #000;
+  color: #fca5a5;
+  font-size: 22px;
+  font-weight: 900;
+  padding: 20px;
+  text-align: center;
+  border: 3px solid #dc2626;
+  border-radius: 12px;
+  text-shadow: 0 0 20px #dc2626;
+  animation: neon-pulse 0.8s ease-in-out infinite;
+}
+@keyframes neon-pulse {
+  0%, 100% { box-shadow: 0 0 20px rgba(239,68,68,0.3), inset 0 0 20px rgba(239,68,68,0.1); }
+  50% { box-shadow: 0 0 40px rgba(239,68,68,0.8), inset 0 0 30px rgba(239,68,68,0.3); }
+}\n`;
+    text += '```\n\n';
+
+    text += `### 3. Minimal Pill — Subtle rounded badge\n`;
+    text += '```css\n';
+    text += `.message.check {
+  background: rgba(239, 68, 68, 0.1);
+  color: #ef4444;
+  font-weight: 600;
+  font-size: 13px;
+  padding: 6px 14px;
+  border-radius: 999px;
+  display: inline-block;
+  margin: 0 auto 12px;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+.message.checkmate {
+  background: rgba(220, 38, 38, 0.15);
+  color: #dc2626;
+  font-weight: 700;
+  font-size: 15px;
+  padding: 10px 20px;
+  border-radius: 999px;
+  display: inline-block;
+  border: 2px solid #dc2626;
+}\n`;
+    text += '```\n\n';
+
+    text += `### 4. Chess-themed — Crown icon and gold accent\n`;
+    text += '```css\n';
+    text += `.message.check {
+  background: #1a1a2e;
+  color: #fbbf24;
+  font-weight: 700;
+  font-size: 14px;
+  padding: 12px 16px 12px 44px;
+  border-radius: 8px;
+  border-left: 4px solid #ef4444;
+  position: relative;
+  font-family: 'Georgia', serif;
+}
+.message.check::before {
+  content: '♔';
+  position: absolute;
+  left: 14px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 24px;
+  color: #ef4444;
+  animation: shake 0.4s infinite alternate;
+}
+.message.checkmate {
+  background: linear-gradient(135deg, #1a1a2e, #16213e);
+  color: #fbbf24;
+  font-size: 18px;
+  font-weight: 700;
+  padding: 20px 24px;
+  border-radius: 12px;
+  border: 2px solid #dc2626;
+  box-shadow: 0 8px 30px rgba(0,0,0,0.5);
+  font-family: 'Georgia', serif;
+  letter-spacing: 1px;
+}
+.message.checkmate::before { content: '♚ '; font-size: 24px; }
+@keyframes shake {
+  from { transform: translateY(-50%) rotate(-5deg); }
+  to { transform: translateY(-50%) rotate(5deg); }
+}\n`;
+    text += '```\n\n';
+
+    text += `### How to apply\n`;
+    text += `1. Click **Copy** on the variant you like\n`;
+    text += `2. Open \`src/app/app.component.ts\` in the IDE\n`;
+    text += `3. Find the existing \`.message.check\` and \`.message.checkmate\` rules in the \`styles: [\`...\`]\` array\n`;
+    text += `4. Replace them with the copied CSS\n`;
+    text += `5. Save (Ctrl+S) — \`ng serve\` will hot-reload\n`;
+
+    return {
+      id: '', role: 'ai', text, timestamp: new Date(),
+      steps: [
+        { label: 'Detected style-only request', status: 'done', detail: 'offering CSS variants' },
+        { label: 'Generated 4 style variants', status: 'done', detail: 'banner, neon, pill, chess-themed' },
+      ],
+    };
+  }
+
   private cmdEnhanceProject(input: string, report: ProjectReport): ChatMessage {
+    const cmd = input.toLowerCase();
+    // Detect style-only requests — offer CSS snippets instead of full file replacement
+    if (/\b(style|styling|look|appearance|color|design|theme|banner|background)\b/i.test(cmd)
+        && /\b(check|checkmate|notif|banner|alert)\b/i.test(cmd)) {
+      return this.cmdCheckNotificationStyles(cmd);
+    }
+
     // Check if any known enhancement matches the request + current project
     const fileContents = report.files.map(f => ({ path: f.path, content: f.content }));
     const match = this.enhancements.detect(input, fileContents);
 
     if (!match) {
-      // Fall through to knowledge base code generation for custom enhancements
+      // Check if the request matched triggers but the project wasn't recognized
+      const triggerOnlyMatch = this.enhancements.detectTriggerOnly(input);
+      if (triggerOnlyMatch) {
+        // Triggers matched but no matching project file content → apply anyway using match's target file
+        // (user likely wants this but project files may have been customized)
+        const targetFile = report.files.find(f =>
+          f.path.endsWith(triggerOnlyMatch.targetFile) ||
+          f.path === (report.tree?.name || '') + '/' + triggerOnlyMatch.targetFile
+        );
+        if (targetFile) {
+          return this.applyEnhancement(triggerOnlyMatch, targetFile, report);
+        }
+        return {
+          id: '', role: 'ai', timestamp: new Date(),
+          text: `## Enhancement Matched but Target File Missing\n\nI detected you want: **${triggerOnlyMatch.name}**\n\n${triggerOnlyMatch.description}\n\nBut I couldn't find the target file \`${triggerOnlyMatch.targetFile}\` in your project. Make sure the file exists, then try again.`,
+        };
+      }
+
       return {
         id: '', role: 'ai', timestamp: new Date(),
-        text: `## Enhancement Request Received\n\nI don't have a pre-built enhancement matching your request.\n\n**Available enhancements for this project type:**\n${this.enhancements.list().map(e => `- **${e.name}** — ${e.description}`).join('\n')}\n\nOr describe it more specifically and I'll try to generate the patch.`,
+        text: `## Enhancement Request Received\n\nI don't have a pre-built enhancement matching your request.\n\n**Available enhancements:**\n${this.enhancements.list().map(e => `- **${e.name}** — ${e.description}`).join('\n')}\n\nDescribe your change more specifically.`,
       };
     }
 
@@ -926,21 +1289,33 @@ export class AIEngineService {
       };
     }
 
-    // Apply the patch — full file replacement
+    return this.applyEnhancement(match, targetFile, report);
+  }
+
+  /** Apply a matched enhancement to a specific file: update scanner + write to disk + format response */
+  private applyEnhancement(match: import('./enhancements.service').Enhancement, targetFile: ProjectFile, report: ProjectReport): ChatMessage {
     if (!this.scanner) {
       return { id: '', role: 'ai', text: 'Scanner not available.', timestamp: new Date() };
     }
 
-    const newContent = match.newContent;
+    const folderName = report.tree?.name || '';
+    // Substitute {{BT}} placeholder with actual backtick — lets template strings round-trip safely
+    const newContent = match.newContent.replace(/\{\{BT\}\}/g, '`');
+
+    // Record the original content for diff visualization (green/red highlights in editor)
+    this.scanner!.markPendingDiff(targetFile.path, targetFile.content);
+
     const updatedFile = { ...targetFile, content: newContent, size: newContent.length };
     const allFiles = report.files.map(f => f.path === targetFile.path ? updatedFile : f);
     const tree = this.scanner.buildTree(allFiles);
     if (report.tree?.name) { tree.name = report.tree.name; tree.path = report.tree.path; }
     const newReport = { ...report, files: allFiles, tree };
     this.scanner.report.set(newReport as any);
-    this.scanner.selectedFilePath.set(targetFile.path);
 
-    // Write to disk if basePath set
+    // Force the selectedFilePath signal to re-fire (even if same path) by toggling
+    this.scanner.selectedFilePath.set(null);
+    setTimeout(() => this.scanner!.selectedFilePath.set(targetFile.path), 10);
+
     const basePath = this.scanner.projectBasePath();
     let diskWritten = false;
     if (basePath) {
@@ -1184,6 +1559,225 @@ export class AIEngineService {
   }
 
   // ===== ALGORITHM / SNIPPET GENERATOR =====
+
+  /**
+   * Evaluate arithmetic expressions safely.
+   * Accepts: "98 * 23", "98 multiplied by 23", "(5+3)/2", "sqrt(144)", "2^10", "15% of 80"
+   */
+  private tryMath(input: string): ChatMessage | null {
+    let q = input.toLowerCase().trim().replace(/[?!]+$/g, '');
+
+    // Replace word operators with symbols
+    const replacements: [RegExp, string][] = [
+      [/\s+(multiplied\s*by|times|into|mul|multiply)\s+/g, ' * '],
+      [/\s+(divided\s*by|over|div|divide)\s+/g, ' / '],
+      [/\s+(plus|added\s*to|add)\s+/g, ' + '],
+      [/\s+(minus|subtract(ed)?\s*(from|by)?|sub)\s+/g, ' - '],
+      [/\s+(modulo|mod|remainder)\s+/g, ' % '],
+      [/\s+(to\s+the\s+power\s+(of)?|power\s+of|raised\s+to|pow|\*\*)\s+/g, ' ^ '],
+      [/\bsquare\s+root\s+of\s+/g, 'sqrt '],
+      [/\bcube\s+root\s+of\s+/g, 'cbrt '],
+      [/\bsquared\b/g, '^2'],
+      [/\bcubed\b/g, '^3'],
+    ];
+    for (const [pat, rep] of replacements) q = q.replace(pat, rep);
+
+    // "N% of M" → "N / 100 * M"
+    q = q.replace(/(\d+(?:\.\d+)?)\s*%\s*of\s+(\d+(?:\.\d+)?)/g, '($1 / 100) * $2');
+
+    // Strip common noise words
+    const cleaned = q
+      .replace(/\b(what\s*is|what's|compute|calculate|evaluate|solve|find|equal to|result of|the answer)\b/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    // Must look like an expression: digits and operators only (plus sqrt/cbrt/parens)
+    // Reject if there are letters other than our allowed functions
+    const allowed = cleaned.replace(/sqrt|cbrt|sin|cos|tan|log|ln|pi|e\b/g, '');
+    if (!/^[\s\d+\-*/%^().,]+$/.test(allowed)) return null;
+    if (!/\d/.test(cleaned)) return null;
+    // Must contain at least one operator OR a function
+    if (!/[+\-*/%^]|sqrt|cbrt|sin|cos|tan|log|ln/.test(cleaned)) return null;
+
+    // Convert to JS-eval-safe expression
+    let jsExpr = cleaned
+      .replace(/\^/g, '**')
+      .replace(/\bsqrt\s*\(?([^)]+)\)?/g, 'Math.sqrt($1)')
+      .replace(/\bcbrt\s*\(?([^)]+)\)?/g, 'Math.cbrt($1)')
+      .replace(/\bsin\s*\(?([^)]+)\)?/g, 'Math.sin($1)')
+      .replace(/\bcos\s*\(?([^)]+)\)?/g, 'Math.cos($1)')
+      .replace(/\btan\s*\(?([^)]+)\)?/g, 'Math.tan($1)')
+      .replace(/\blog\s*\(?([^)]+)\)?/g, 'Math.log10($1)')
+      .replace(/\bln\s*\(?([^)]+)\)?/g, 'Math.log($1)')
+      .replace(/\bpi\b/g, 'Math.PI')
+      .replace(/(?<!\w)e(?!\w)/g, 'Math.E');
+
+    // Final safety check — only whitelisted tokens
+    const safe = /^[\s\d+\-*/%().\,]+(?:Math\.(PI|E|sqrt|cbrt|sin|cos|tan|log10|log)\([^)]*\)|\*\*)*[\s\d+\-*/%().\,]*$/;
+    // Above is permissive; do an explicit dangerous-pattern reject instead:
+    if (/[a-zA-Z_$][a-zA-Z0-9_$]*/.test(jsExpr.replace(/Math\.(PI|E|sqrt|cbrt|sin|cos|tan|log10|log|pow)/g, ''))) {
+      return null;
+    }
+
+    try {
+      const result = Function(`"use strict"; return (${jsExpr});`)();
+      if (typeof result !== 'number' || !isFinite(result)) return null;
+
+      // Format result
+      let formatted: string;
+      if (Number.isInteger(result)) {
+        formatted = result.toLocaleString('en-US');
+      } else {
+        // Round to 10 significant digits, strip trailing zeros
+        formatted = Number(result.toPrecision(12)).toString();
+      }
+
+      // Build response — show the original and the result
+      const original = cleaned.replace(/\*\*/g, '^');
+      return {
+        id: '', role: 'ai', timestamp: new Date(),
+        text: `## ${original} = **${formatted}**\n\n\`\`\`\n${original.trim()} = ${result}\n\`\`\``,
+        steps: [
+          { label: 'Parsed expression', status: 'done', detail: original.trim() },
+          { label: 'Evaluated', status: 'done', detail: formatted },
+        ],
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Detect requests for computed results, e.g. "fibonacci series of 15", "factorial of 10".
+   * Returns ChatMessage with actual values, or null if not a compute request.
+   */
+  private tryCompute(input: string): ChatMessage | null {
+    const q = input.toLowerCase().replace(/[?!]/g, '').trim();
+
+    // Extract a number from the query
+    const numMatch = q.match(/\b(\d+)\b/);
+    if (!numMatch) return null;
+    let n = parseInt(numMatch[1]);
+    if (isNaN(n)) return null;
+
+    // Normalize common typos
+    const norm = q
+      .replace(/fibinosis|fibnosis|fibanocci|fibnacci|fibonacy|febonacci|fibbo|fibanacci/g, 'fibonacci')
+      .replace(/factoral|factorail/g, 'factorial')
+      .replace(/palindrom\b/g, 'palindrome');
+
+    // Fibonacci
+    if (/\bfibonacci\b|\bfib\b/.test(norm) && /\b(series|sequence|numbers|up\s*to|first|of)\b/.test(norm)) {
+      n = Math.min(n, 1000); // cap
+      const series: bigint[] = [];
+      let a = 0n, b = 1n;
+      for (let i = 0; i < n; i++) {
+        series.push(a);
+        [a, b] = [b, a + b];
+      }
+      const display = series.map(String).join(', ');
+      let text = `## Fibonacci Series (first ${n})\n\n`;
+      text += '```\n' + display + '\n```\n\n';
+      if (n >= 5) text += `**Total numbers:** ${n}\n`;
+      text += `**Sum:** ${series.reduce((s, x) => s + x, 0n)}\n`;
+      text += `**Last value:** ${series[series.length - 1]}\n`;
+      return {
+        id: '', role: 'ai', text, timestamp: new Date(),
+        steps: [
+          { label: 'Detected compute request', status: 'done', detail: `Fibonacci × ${n}` },
+          { label: 'Generated series', status: 'done', detail: `${n} numbers` },
+        ],
+      };
+    }
+
+    // Factorial — "factorial of 10"
+    if (/\bfactorial\b/.test(norm)) {
+      if (n > 170) {
+        return { id: '', role: 'ai', timestamp: new Date(),
+          text: `**Factorial of ${n}** is too large for regular JS numbers (overflows at n > 170). Use BigInt or Python.` };
+      }
+      let result = 1n;
+      for (let i = 2n; i <= BigInt(n); i++) result *= i;
+      const text = `## Factorial of ${n}\n\n\`\`\`\n${n}! = ${result.toString()}\n\`\`\`\n\n**Digits:** ${result.toString().length}`;
+      return { id: '', role: 'ai', text, timestamp: new Date(),
+        steps: [{ label: 'Computed', status: 'done', detail: `${n}!` }] };
+    }
+
+    // Primes up to N
+    if (/\bprimes?\b|\bprime\s*numbers\b/.test(norm) && /\b(up\s*to|below|under|less|first|of)\b/.test(norm)) {
+      n = Math.min(n, 100000);
+      const primes: number[] = [];
+
+      if (/first/.test(norm)) {
+        // First N primes
+        let num = 2;
+        while (primes.length < n) {
+          let isPrime = num > 1;
+          for (let i = 2; i * i <= num; i++) if (num % i === 0) { isPrime = false; break; }
+          if (isPrime) primes.push(num);
+          num++;
+        }
+      } else {
+        // Primes up to N
+        const sieve = new Array(n + 1).fill(true);
+        sieve[0] = sieve[1] = false;
+        for (let i = 2; i * i <= n; i++) if (sieve[i]) for (let j = i * i; j <= n; j += i) sieve[j] = false;
+        for (let i = 2; i <= n; i++) if (sieve[i]) primes.push(i);
+      }
+
+      const display = primes.length > 500
+        ? primes.slice(0, 100).join(', ') + `, ...\n(showing first 100 of ${primes.length})`
+        : primes.join(', ');
+      const label = /first/.test(norm) ? `First ${n} Primes` : `Primes up to ${n}`;
+      return { id: '', role: 'ai', timestamp: new Date(),
+        text: `## ${label}\n\n\`\`\`\n${display}\n\`\`\`\n\n**Count:** ${primes.length} primes\n**Sum:** ${primes.reduce((s, x) => s + x, 0)}`,
+        steps: [{ label: 'Sieve of Eratosthenes', status: 'done', detail: `${primes.length} primes` }]
+      };
+    }
+
+    // Multiplication table of N
+    if (/\b(multiplication\s*table|times\s*table)\b/.test(norm)) {
+      const rows = Math.min(n, 20);
+      const lines = [];
+      for (let i = 1; i <= rows; i++) lines.push(`${n} × ${i} = ${n * i}`);
+      return { id: '', role: 'ai', timestamp: new Date(),
+        text: `## Multiplication Table of ${n}\n\n\`\`\`\n${lines.join('\n')}\n\`\`\`` };
+    }
+
+    // Power of 2 / powers
+    if (/\bpower\s*of\s*2\b|\bpowers\s*of\s*2\b|\b2\^/.test(norm)) {
+      n = Math.min(n, 64);
+      const powers: bigint[] = [];
+      let val = 1n;
+      for (let i = 0; i <= n; i++) { powers.push(val); val *= 2n; }
+      return { id: '', role: 'ai', timestamp: new Date(),
+        text: `## Powers of 2 (up to 2^${n})\n\n\`\`\`\n${powers.map((v, i) => `2^${i} = ${v}`).join('\n')}\n\`\`\`` };
+    }
+
+    return null;
+  }
+
+  private cmdLeetProblem(p: LeetProblem): ChatMessage {
+    const diffColor: Record<string, string> = { Easy: '🟢', Medium: '🟡', Hard: '🔴' };
+
+    let text = `## ${diffColor[p.difficulty]} ${p.number ? '#' + p.number + '. ' : ''}${p.title}\n\n`;
+    text += `**Difficulty:** ${p.difficulty}\n`;
+    text += `**Time Complexity:** \`${p.complexity.time}\`\n`;
+    text += `**Space Complexity:** \`${p.complexity.space}\`\n\n`;
+    text += `### Approach\n${p.approach}\n\n`;
+    text += `### Solution\n\`\`\`javascript\n${p.code}\n\`\`\`\n\n`;
+    text += `### Tests\n\`\`\`javascript\n${p.tests}\n\`\`\`\n\n`;
+    text += `*💡 Paste the solution and tests into the chat to execute them.*`;
+
+    return {
+      id: '', role: 'ai', text, timestamp: new Date(),
+      steps: [
+        { label: 'Detected coding problem', status: 'done', detail: p.title },
+        { label: 'Retrieved solution', status: 'done', detail: `${p.complexity.time} time` },
+        { label: 'Included tests', status: 'done', detail: p.tests.split('\n').length + ' test cases' },
+      ],
+    };
+  }
 
   private cmdAlgorithm(snippet: any): ChatMessage {
     let text = `## ${snippet.name.charAt(0).toUpperCase() + snippet.name.slice(1).replace(/-/g, ' ')}\n\n`;
@@ -2081,7 +2675,74 @@ app.listen(process.env.PORT || 3000, () => {
   }
 
   private tplLoginComponent(): string {
-    return `import { Component } from '@angular/core';\nimport { CommonModule } from '@angular/common';\nimport { FormsModule } from '@angular/forms';\nimport { HttpClient } from '@angular/common/http';\nimport { Router } from '@angular/router';\n\n@Component({\n  selector: 'app-login', standalone: true, imports: [CommonModule, FormsModule],\n  template: \`<div style="display:flex;align-items:center;justify-content:center;min-height:100vh;background:#0f0c29">\n    <div style="background:rgba(255,255,255,.05);padding:40px;border-radius:16px;width:400px;border:1px solid rgba(255,255,255,.1)">\n      <h2 style="color:#fff;margin:0 0 20px">{{isLogin?'Login':'Register'}}</h2>\n      <div *ngIf="error" style="color:#f87171;background:rgba(239,68,68,.1);padding:10px;border-radius:8px;margin-bottom:16px">{{error}}</div>\n      <input *ngIf="!isLogin" [(ngModel)]="name" placeholder="Name" style="width:100%;padding:12px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.15);border-radius:8px;color:#fff;margin-bottom:12px;box-sizing:border-box" />\n      <input [(ngModel)]="email" placeholder="Email" style="width:100%;padding:12px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.15);border-radius:8px;color:#fff;margin-bottom:12px;box-sizing:border-box" />\n      <input [(ngModel)]="password" type="password" placeholder="Password" (keydown.enter)="submit()" style="width:100%;padding:12px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.15);border-radius:8px;color:#fff;margin-bottom:16px;box-sizing:border-box" />\n      <button (click)="submit()" [disabled]="loading" style="width:100%;padding:14px;background:linear-gradient(135deg,#6366f1,#8b5cf6);border:none;border-radius:8px;color:#fff;font-size:16px;font-weight:600;cursor:pointer">{{loading?'Wait...':(isLogin?'Login':'Register')}}</button>\n      <p (click)="isLogin=!isLogin" style="text-align:center;color:#818cf8;cursor:pointer;margin-top:16px">{{isLogin?'No account? Register':'Have account? Login'}}</p>\n    </div></div>\`\n})\nexport class LoginComponent {\n  isLogin=true; name=''; email=''; password=''; loading=false; error='';\n  constructor(private http:HttpClient, private router:Router){}\n  submit(){\n    this.loading=true; this.error='';\n    const url=this.isLogin?'/api/auth/login':'/api/auth/register';\n    const body=this.isLogin?{email:this.email,password:this.password}:{name:this.name,email:this.email,password:this.password};\n    this.http.post<any>(url,body).subscribe({\n      next:r=>{localStorage.setItem('token',r.token);this.router.navigate(['/']);},\n      error:e=>{this.error=e.error?.error||'Error';this.loading=false;}\n    });\n  }\n}`;
+    return `import { Component, inject } from '@angular/core';
+import { CommonModule } from '@angular/common';
+import { FormsModule } from '@angular/forms';
+import { Router } from '@angular/router';
+import { AuthService } from '../services/auth.service';
+
+@Component({
+  selector: 'app-login',
+  standalone: true,
+  imports: [CommonModule, FormsModule],
+  template: \`
+    <div class="login-wrap">
+      <div class="login-card">
+        <h2>{{ isLogin ? 'Login' : 'Register' }}</h2>
+        <div class="error" *ngIf="error">{{ error }}</div>
+        <input *ngIf="!isLogin" [(ngModel)]="name" placeholder="Name" class="input" />
+        <input [(ngModel)]="email" placeholder="Email" type="email" class="input" />
+        <input [(ngModel)]="password" placeholder="Password" type="password" class="input" (keydown.enter)="submit()" />
+        <button (click)="submit()" [disabled]="loading" class="btn">
+          {{ loading ? 'Please wait...' : (isLogin ? 'Login' : 'Register') }}
+        </button>
+        <p class="toggle" (click)="isLogin = !isLogin">
+          {{ isLogin ? 'No account? Register' : 'Have account? Login' }}
+        </p>
+      </div>
+    </div>
+  \`,
+  styles: [\`
+    .login-wrap { display:flex; align-items:center; justify-content:center; min-height:100vh; background:linear-gradient(135deg,#0f0c29,#302b63,#24243e); }
+    .login-card { background:rgba(255,255,255,.06); padding:40px; border-radius:16px; width:400px; border:1px solid rgba(255,255,255,.1); backdrop-filter:blur(10px); }
+    h2 { color:#fff; margin:0 0 24px; font-size:28px; }
+    .error { color:#f87171; background:rgba(239,68,68,.1); padding:10px 14px; border-radius:8px; margin-bottom:16px; font-size:14px; }
+    .input { width:100%; padding:12px 16px; background:rgba(255,255,255,.06); border:1px solid rgba(255,255,255,.15); border-radius:8px; color:#fff; margin-bottom:12px; box-sizing:border-box; font-size:15px; outline:none; transition:border .2s; }
+    .input:focus { border-color:#6366f1; }
+    .btn { width:100%; padding:14px; background:linear-gradient(135deg,#6366f1,#8b5cf6); border:none; border-radius:8px; color:#fff; font-size:16px; font-weight:600; cursor:pointer; margin-top:4px; transition:opacity .2s; }
+    .btn:hover { opacity:.9; }
+    .btn:disabled { opacity:.5; cursor:not-allowed; }
+    .toggle { text-align:center; color:#818cf8; cursor:pointer; margin-top:16px; font-size:14px; }
+    .toggle:hover { text-decoration:underline; }
+  \`]
+})
+export class LoginComponent {
+  private auth = inject(AuthService);
+  private router = inject(Router);
+
+  isLogin = true;
+  name = '';
+  email = '';
+  password = '';
+  loading = false;
+  error = '';
+
+  submit(): void {
+    if (!this.email || !this.password) { this.error = 'Email and password required'; return; }
+    if (!this.isLogin && !this.name) { this.error = 'Name required'; return; }
+    this.loading = true;
+    this.error = '';
+
+    const action = this.isLogin
+      ? this.auth.login(this.email, this.password)
+      : this.auth.register(this.name, this.email, this.password);
+
+    action.subscribe({
+      next: () => this.router.navigate(['/']),
+      error: (e) => { this.error = e.error?.error || 'Something went wrong'; this.loading = false; }
+    });
+  }
+}`;
   }
 
   private tplModel(name: string): string {
@@ -2096,6 +2757,129 @@ app.listen(process.env.PORT || 3000, () => {
   private tplComponent(name: string): string {
     const cls = name.charAt(0).toUpperCase() + name.slice(1);
     return `import { Component, OnInit } from '@angular/core';\nimport { CommonModule } from '@angular/common';\n\n@Component({\n  selector: 'app-${name}',\n  standalone: true,\n  imports: [CommonModule],\n  template: \`<div><h2>${cls}</h2><p>Component works!</p></div>\`\n})\nexport class ${cls}Component implements OnInit {\n  ngOnInit() {}\n}`;
+  }
+
+  private tplAuthService(): string {
+    return `import { Injectable, signal, computed, inject } from '@angular/core';
+import { HttpClient } from '@angular/common/http';
+import { Router } from '@angular/router';
+import { Observable, tap } from 'rxjs';
+
+export interface User { _id: string; name: string; email: string; role: string; }
+
+@Injectable({ providedIn: 'root' })
+export class AuthService {
+  private http = inject(HttpClient);
+  private router = inject(Router);
+  private apiUrl = 'http://localhost:4100/api/auth';
+
+  currentUser = signal<User | null>(null);
+  token = signal<string | null>(null);
+  isLoggedIn = computed(() => !!this.token());
+
+  constructor() {
+    const t = localStorage.getItem('token');
+    const u = localStorage.getItem('user');
+    if (t && u) { this.token.set(t); this.currentUser.set(JSON.parse(u)); }
+  }
+
+  register(name: string, email: string, password: string): Observable<any> {
+    return this.http.post(\`\${this.apiUrl}/register\`, { name, email, password });
+  }
+
+  login(email: string, password: string): Observable<any> {
+    return this.http.post<any>(\`\${this.apiUrl}/login\`, { email, password })
+      .pipe(tap(res => {
+        localStorage.setItem('token', res.token);
+        localStorage.setItem('user', JSON.stringify(res.user));
+        this.token.set(res.token);
+        this.currentUser.set(res.user);
+      }));
+  }
+
+  logout(): void {
+    localStorage.removeItem('token');
+    localStorage.removeItem('user');
+    this.token.set(null);
+    this.currentUser.set(null);
+    this.router.navigate(['/login']);
+  }
+
+  getToken(): string | null { return this.token(); }
+}`;
+  }
+
+  private tplAuthGuard(): string {
+    return `import { inject } from '@angular/core';
+import { Router, CanActivateFn } from '@angular/router';
+import { AuthService } from '../services/auth.service';
+
+export const authGuard: CanActivateFn = () => {
+  const auth = inject(AuthService);
+  return auth.isLoggedIn() ? true : inject(Router).createUrlTree(['/login']);
+};`;
+  }
+
+  private tplAuthInterceptor(): string {
+    return `import { HttpInterceptorFn } from '@angular/common/http';
+import { inject } from '@angular/core';
+import { AuthService } from '../services/auth.service';
+
+export const authInterceptor: HttpInterceptorFn = (req, next) => {
+  const token = inject(AuthService).getToken();
+  if (token) {
+    req = req.clone({ setHeaders: { Authorization: \`Bearer \${token}\` } });
+  }
+  return next(req);
+};`;
+  }
+
+  private tplAppRoutes(appCompClass: string = 'AppComponent'): string {
+    return `import { Routes } from '@angular/router';
+import { authGuard } from './guards/auth.guard';
+
+export const routes: Routes = [
+  { path: 'login', loadComponent: () => import('./login/login.component').then(m => m.LoginComponent) },
+  { path: '', canActivate: [authGuard], loadComponent: () => import('./app.component').then(m => m.${appCompClass}) },
+  { path: '**', redirectTo: '' },
+];`;
+  }
+
+  private tplAppConfig(): string {
+    return `import { ApplicationConfig } from '@angular/core';
+import { provideRouter } from '@angular/router';
+import { provideHttpClient, withInterceptors } from '@angular/common/http';
+import { routes } from './app.routes';
+import { authInterceptor } from './interceptors/auth.interceptor';
+
+export const appConfig: ApplicationConfig = {
+  providers: [
+    provideRouter(routes),
+    provideHttpClient(withInterceptors([authInterceptor])),
+  ]
+};`;
+  }
+
+  private tplMainTs(): string {
+    return `import { bootstrapApplication } from '@angular/platform-browser';
+import { ShellComponent } from './app/shell.component';
+import { appConfig } from './app/app.config';
+
+bootstrapApplication(ShellComponent, appConfig)
+  .catch(err => console.error(err));`;
+  }
+
+  private tplShellComponent(): string {
+    return `import { Component } from '@angular/core';
+import { RouterOutlet } from '@angular/router';
+
+@Component({
+  selector: 'app-root',
+  standalone: true,
+  imports: [RouterOutlet],
+  template: '<router-outlet></router-outlet>'
+})
+export class ShellComponent {}`;
   }
 
   // ===== HELPERS =====

@@ -26,11 +26,23 @@ export class EnhancementsService {
       name: 'Chess: Check/Checkmate Detection + Promotion Dialog',
       description: 'Ends game on checkmate/king capture, adds promotion piece selector',
       triggers: [
-        /\bcheck\s*mate|checkmate|king.*(captur|safe)|game\s*(over|ends|stops)|promot(ion|e).*(dialog|choose|ask|select)/i,
-        /asks?\s*for.*promo|choose.*promotion|promotion.*(choice|dialog|popup)/i,
-        /game runs.*king.*captured|pawn.*automatically.*promotes/i,
+        // Checkmate / king capture / game over
+        /\bcheck\s*mate|\bcheckmate\b|king.*(captur|safe)|game\s*(is\s*)?(over|ends|stops)/i,
+        /game runs.*king.*captured/i,
+        // Check notification — incl. short phrasings: "update check and checkmate notifications"
+        /\bcheck\s+(is\s+)?given|notif(y|ied|ication).*check|check.*notif/i,
+        /when.*check.*(notif|show|alert|display)/i,
+        /\bcheck\s+and\s+checkmate\b/i,
+        /\b(update|fix|improve|add|change|enhance)\s+(the\s+)?check(mate)?(\s+and\s+checkmate)?\s+notif/i,
+        /check(mate)?\s+notification/i,
+        // Promotion dialog
+        /promot(ion|e).*(dialog|choose|ask|select|option)|choose.*promotion|promotion.*(choice|dialog|popup|option)/i,
+        /give\s*(me\s*)?(4|four)?\s*options?.*\b(queen|rook|bishop|knight)\b/i,
+        /pawn.*automatically.*promotes|pawn.*reaches?.*end/i,
+        /\b(queen|rook|bishop|knight)\b.*\b(queen|rook|bishop|knight)\b.*\b(queen|rook|bishop|knight)\b/i,
       ],
-      detectsProject: /PIECE_SYMBOLS|initialBoard|getLegalMoves/,
+      // Loosened — any chess signal in any file: piece symbols, move logic, chess components, or piece names clustered together
+      detectsProject: /PIECE_SYMBOLS|initialBoard|getLegalMoves|getRawMoves|isKingInCheck|\bchess\b|\bpawn\b[\s\S]{0,200}\bknight\b|\bknight\b[\s\S]{0,200}\bbishop\b|\bbishop\b[\s\S]{0,200}\bqueen\b/i,
       targetFile: 'src/app/app.component.ts',
       changes: [
         'Added check detection (king under threat)',
@@ -70,7 +82,7 @@ function initialBoard(): Piece[][] {
   selector: 'app-root',
   standalone: true,
   imports: [CommonModule],
-  template: \\\`
+  template: \{{BT}}
     <div class="page">
       <div class="game">
         <h1>\u265F Chess</h1>
@@ -120,7 +132,7 @@ function initialBoard(): Piece[][] {
           <h2>Promote Pawn</h2>
           <p>Choose a piece to promote to:</p>
           <div class="choices">
-            <button *ngFor="let opt of ['queen','rook','bishop','knight']" (click)="choosePromotion(opt)">
+            <button *ngFor="let opt of promotionOptions" (click)="choosePromotion(opt)">
               <span class="choice-symbol">{{ promotion()?.color === 'w' ? PIECE_SYMBOLS[opt].w : PIECE_SYMBOLS[opt].b }}</span>
               <span class="choice-name">{{ opt }}</span>
             </button>
@@ -137,8 +149,8 @@ function initialBoard(): Piece[][] {
         </div>
       </div>
     </div>
-  \\\`,
-  styles: [\\\`
+  \{{BT}},
+  styles: [\{{BT}}
     .page { display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px; }
     .game { background:rgba(255,255,255,0.04);backdrop-filter:blur(20px);border:1px solid rgba(255,255,255,0.1);border-radius:20px;padding:32px;max-width:640px;width:100%; }
     h1 { color:#fff;text-align:center;margin:0 0 12px;font-size:28px; }
@@ -187,10 +199,11 @@ function initialBoard(): Piece[][] {
     .dialog button.primary:hover { transform:translateY(-1px);box-shadow:0 8px 20px rgba(99,102,241,0.3); }
 
     @media (max-width:700px) { .cell { font-size:28px; } .game { padding:16px; } }
-  \\\`]
+  \{{BT}}]
 })
 export class AppComponent {
   PIECE_SYMBOLS = PIECE_SYMBOLS;
+  promotionOptions: PieceType[] = ['queen', 'rook', 'bishop', 'knight'];
   board = signal<Piece[][]>(initialBoard());
   turn = signal<'w' | 'b'>('w');
   selected = signal<{ r: number; c: number } | null>(null);
@@ -265,7 +278,7 @@ export class AppComponent {
         newBoard[tr][tc] = piece;
         newBoard[fr][fc] = null;
         this.board.set(newBoard);
-        this.endGame(\\\`\\\${piece.color === 'w' ? 'White' : 'Black'} wins!\\\`, 'King captured');
+        this.endGame(\{{BT}}\\\${piece.color === 'w' ? 'White' : 'Black'} wins!\{{BT}}, 'King captured');
         return;
       }
     }
@@ -285,12 +298,11 @@ export class AppComponent {
     this.afterMove();
   }
 
-  choosePromotion(type: string) {
+  choosePromotion(type: PieceType) {
     const p = this.promotion();
     if (!p) return;
-    const t = type as PieceType;
     const newBoard = this.board().map(row => [...row]);
-    newBoard[p.r][p.c] = { type: t, color: p.color, symbol: PIECE_SYMBOLS[t][p.color] };
+    newBoard[p.r][p.c] = { type, color: p.color, symbol: PIECE_SYMBOLS[type][p.color] };
     this.board.set(newBoard);
     this.promotion.set(null);
     this.afterMove();
@@ -305,7 +317,7 @@ export class AppComponent {
     if (!legalMovesExist) {
       if (check) {
         const winner = this.turn() === 'w' ? 'Black' : 'White';
-        this.endGame(\\\`Checkmate! \\\${winner} wins!\\\`, 'No legal moves — king is in check.');
+        this.endGame(\{{BT}}Checkmate! \\\${winner} wins!\{{BT}}, 'No legal moves — king is in check.');
       } else {
         this.endGame('Stalemate!', 'No legal moves — draw.');
       }
@@ -313,7 +325,7 @@ export class AppComponent {
     }
 
     if (check) {
-      this.statusMsg.set(\\\`\\\${this.turn() === 'w' ? 'White' : 'Black'} is in check!\\\`);
+      this.statusMsg.set(\{{BT}}\\\${this.turn() === 'w' ? 'White' : 'Black'} is in check!\{{BT}});
     } else {
       this.statusMsg.set('');
     }
@@ -460,13 +472,21 @@ export class AppComponent {
    */
   detect(request: string, fileContents: { path: string; content: string }[]): Enhancement | null {
     for (const enh of this.enhancements) {
-      // Must match at least one trigger phrase
       const triggered = enh.triggers.some(r => r.test(request));
       if (!triggered) continue;
-
-      // Must detect the right project type in files
       const matchesProject = fileContents.some(f => enh.detectsProject.test(f.content));
       if (matchesProject) return enh;
+    }
+    return null;
+  }
+
+  /**
+   * Detect which enhancement matches the request IGNORING project check.
+   * Useful for diagnostics when triggers match but the project isn't recognized.
+   */
+  detectTriggerOnly(request: string): Enhancement | null {
+    for (const enh of this.enhancements) {
+      if (enh.triggers.some(r => r.test(request))) return enh;
     }
     return null;
   }

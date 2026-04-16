@@ -36,6 +36,14 @@ app.use('/api/auth', authRoutes);
 const knowledgeRoutes = require('./routes/knowledge');
 app.use('/api/knowledge', knowledgeRoutes);
 
+// ===== GIT ROUTES =====
+const gitRoutes = require('./routes/git');
+app.use('/api/git', gitRoutes);
+
+// ===== LEETCODE ROUTES =====
+const leetcodeRoutes = require('./routes/leetcode');
+app.use('/api/leetcode', leetcodeRoutes);
+
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 

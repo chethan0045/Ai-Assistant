@@ -1,4 +1,4 @@
-import { Component, OnInit, computed, Signal, ViewChild, ElementRef, AfterViewChecked, ChangeDetectorRef } from '@angular/core';
+import { Component, OnInit, computed, Signal, ViewChild, ElementRef, AfterViewChecked, ChangeDetectorRef, effect } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { Router } from '@angular/router';
@@ -7,6 +7,7 @@ import { CodeRunnerService } from './services/code-runner.service';
 import { SyntaxHighlightService } from './services/syntax-highlight.service';
 import { AIEngineService } from './services/ai-engine.service';
 import { FileSystemService } from './services/file-system.service';
+import { GitService } from './services/git.service';
 
 @Component({
   selector: 'app-scanner-ide',
@@ -52,6 +53,10 @@ import { FileSystemService } from './services/file-system.service';
         </button>
         <button class="ab-icon" [class.active]="bottomPanelOpen && bottomTab === 'debug'" (click)="bottomPanelOpen = true; bottomTab = 'debug'" title="Debug">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8" fill="currentColor" stroke="none"/></svg>
+        </button>
+        <button class="ab-icon" [class.active]="scPanelOpen" (click)="toggleSourceControl()" title="Source Control">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 21V9a9 9 0 0 0 9 9"/></svg>
+          <span class="ab-badge" *ngIf="git.status()?.files?.length">{{ git.status()!.files.length }}</span>
         </button>
         <button class="ab-icon ai-icon" [class.active]="aiPanelOpen" (click)="aiPanelOpen = !aiPanelOpen" title="AI Assistant">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 2a3 3 0 0 0-3 3v1a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 9H5a2 2 0 0 0-2 2v1a7 7 0 0 0 14 0v-1a2 2 0 0 0-2-2z"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="8" y1="22" x2="16" y2="22"/></svg>
@@ -119,6 +124,104 @@ import { FileSystemService } from './services/file-system.service';
               <button class="open-folder-btn secondary" (click)="showNewProjectDialog = false">Cancel</button>
             </div>
             <p class="open-folder-hint">Creates folder on disk. Leave path empty for in-memory only.</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== SOURCE CONTROL PANEL ===== -->
+      <div class="sc-panel" *ngIf="scPanelOpen">
+        <div class="sc-header">
+          <span class="sc-title">Source Control</span>
+          <button class="sc-icon-btn" (click)="refreshGit()" title="Refresh">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+          </button>
+          <button class="sc-icon-btn" (click)="scPanelOpen = false" title="Close">&times;</button>
+        </div>
+
+        <!-- Not a git repo -->
+        <div class="sc-empty" *ngIf="git.status() && !git.status()!.initialized">
+          <p>This folder is not a git repository.</p>
+          <button class="sc-btn primary" (click)="initGit()">Initialize Repository</button>
+        </div>
+
+        <!-- Initialized -->
+        <div *ngIf="git.status()?.initialized">
+          <!-- Branch + remote info -->
+          <div class="sc-branch">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 21V9a9 9 0 0 0 9 9"/></svg>
+            <span>{{ git.status()?.branch || 'main' }}</span>
+            <span class="sc-remote" *ngIf="git.status()?.remote">↗ {{ shortRemote() }}</span>
+            <span class="sc-ahead" *ngIf="(git.status()?.ahead ?? 0) > 0">↑{{ git.status()!.ahead }}</span>
+            <span class="sc-behind" *ngIf="(git.status()?.behind ?? 0) > 0">↓{{ git.status()!.behind }}</span>
+          </div>
+
+          <!-- Commit message -->
+          <div class="sc-commit">
+            <textarea
+              class="sc-msg"
+              [(ngModel)]="commitMessage"
+              placeholder="Commit message (Ctrl+Enter to commit)"
+              (keydown.control.enter)="doCommit()"
+              rows="2"
+            ></textarea>
+            <div class="sc-actions">
+              <button class="sc-btn primary" (click)="doCommit()" [disabled]="!commitMessage.trim() || (git.status()?.files?.length ?? 0) === 0">
+                Commit
+              </button>
+              <button class="sc-btn" (click)="doStageAll()" [disabled]="!hasUnstaged()">Stage All</button>
+            </div>
+          </div>
+
+          <!-- Push / Pull -->
+          <div class="sc-sync" *ngIf="git.status()?.remote">
+            <button class="sc-btn" (click)="doPull()">⬇ Pull</button>
+            <button class="sc-btn" (click)="doPush()">⬆ Push</button>
+            <button class="sc-btn" (click)="doPushUpstream()" *ngIf="!hasUpstream()" title="Push with -u to set upstream">First Push</button>
+          </div>
+
+          <!-- Add remote if none -->
+          <div class="sc-no-remote" *ngIf="!git.status()?.remote">
+            <p>No remote configured</p>
+            <div class="sc-remote-add">
+              <input [(ngModel)]="remoteUrl" placeholder="https://github.com/user/repo.git" />
+              <button class="sc-btn primary" (click)="addRemote()" [disabled]="!remoteUrl.trim()">Add Remote</button>
+            </div>
+          </div>
+
+          <!-- Status message -->
+          <div class="sc-status-msg" *ngIf="gitStatusMsg" [class.error]="gitStatusError">
+            {{ gitStatusMsg }}
+          </div>
+
+          <!-- Changes -->
+          <div class="sc-group" *ngIf="stagedFiles().length > 0">
+            <div class="sc-group-head">
+              <span>Staged ({{ stagedFiles().length }})</span>
+              <button class="sc-mini-btn" (click)="doUnstageAll()" title="Unstage all">−</button>
+            </div>
+            <div class="sc-file" *ngFor="let f of stagedFiles()" (click)="openGitFile(f.path)">
+              <span class="sc-file-icon staged">+</span>
+              <span class="sc-file-name">{{ f.path }}</span>
+              <span class="sc-file-status" [class]="'status-' + f.status">{{ statusLetter(f.status) }}</span>
+              <button class="sc-mini-btn" (click)="$event.stopPropagation(); doUnstage(f.path)" title="Unstage">−</button>
+            </div>
+          </div>
+
+          <div class="sc-group" *ngIf="unstagedFiles().length > 0">
+            <div class="sc-group-head">
+              <span>Changes ({{ unstagedFiles().length }})</span>
+              <button class="sc-mini-btn" (click)="doStageAll()" title="Stage all">+</button>
+            </div>
+            <div class="sc-file" *ngFor="let f of unstagedFiles()" (click)="openGitFile(f.path)">
+              <span class="sc-file-icon" [class]="'status-' + f.status">{{ statusLetter(f.status) }}</span>
+              <span class="sc-file-name">{{ f.path }}</span>
+              <button class="sc-mini-btn discard" (click)="$event.stopPropagation(); doDiscard(f.path)" title="Discard changes">⤺</button>
+              <button class="sc-mini-btn" (click)="$event.stopPropagation(); doStage(f.path)" title="Stage">+</button>
+            </div>
+          </div>
+
+          <div class="sc-empty" *ngIf="(git.status()?.files?.length ?? 0) === 0">
+            <p>No changes</p>
           </div>
         </div>
       </div>
@@ -215,10 +318,10 @@ import { FileSystemService } from './services/file-system.service';
               <!-- Diff editor -->
               <div class="diff-area" *ngIf="editorDiffMode">
                 <div class="diff-toolbar">
-                  <span class="diff-title">AI Changes — Review</span>
-                  <button class="diff-btn accept" (click)="acceptDiff()">&#10003; Accept All</button>
-                  <button class="diff-btn reject" (click)="rejectDiff()">&#8634; Revert</button>
-                  <button class="diff-btn close" (click)="closeDiff()">&#10005; Close Diff</button>
+                  <span class="diff-title">AI Changes — Review <span class="diff-count">(<span class="added-count">+{{ diffAddedCount() }}</span> <span class="removed-count">-{{ diffRemovedCount() }}</span>)</span></span>
+                  <button class="diff-btn accept" (click)="acceptDiff()" title="Keep the changes">&#10003; Accept</button>
+                  <button class="diff-btn reject" (click)="rejectDiff()" title="Revert to original">&#8634; Undo</button>
+                  <button class="diff-btn close" (click)="closeDiff()" title="Close diff view (keeps changes, shows normal editor)">&#10005; Close</button>
                 </div>
                 <div class="diff-scroll" #diffScrollEl>
                   <div *ngFor="let dl of editorDiffLines; let i = index"
@@ -373,7 +476,7 @@ import { FileSystemService } from './services/file-system.service';
       </div>
 
       <!-- AI CHAT PANEL -->
-      <div class="ai-panel" *ngIf="aiPanelOpen">
+      <div class="ai-panel" *ngIf="aiPanelOpen" (click)="onAiPanelClick($event)">
         <!-- Header -->
         <div class="ai-header">
           <div class="ai-hdr-left">
@@ -466,8 +569,20 @@ import { FileSystemService } from './services/file-system.service';
                   <span class="ai-step-meta" *ngIf="step.detail">{{ step.detail }}</span>
                 </div>
               </div>
-              <!-- Text -->
-              <div class="ai-msg-text" [innerHTML]="formatAiText(msg.text)"></div>
+              <!-- Text (parsed into segments for reliable code-block rendering) -->
+              <div class="ai-msg-text">
+                <ng-container *ngFor="let seg of parseMessage(msg.text); trackBy: trackSeg">
+                  <div *ngIf="seg.type === 'code'" class="code-block">
+                    <div class="code-block-head">
+                      <span class="code-block-lang">{{ seg.lang }}</span>
+                      <button type="button" class="code-block-copy"
+                              (click)="copyToClipboard(seg.content, $event)">Copy</button>
+                    </div>
+                    <pre class="code-block-body"><code>{{ seg.content }}</code></pre>
+                  </div>
+                  <div *ngIf="seg.type === 'text'" class="ai-text-segment" [innerHTML]="formatInlineText(seg.content)"></div>
+                </ng-container>
+              </div>
               <!-- Artifacts -->
               <div *ngFor="let art of msg.artifacts" class="ai-artifact">
                 <div class="art-top">
@@ -739,7 +854,10 @@ import { FileSystemService } from './services/file-system.service';
     /* DIFF EDITOR */
     .diff-area { flex: 1; display: flex; flex-direction: column; overflow: hidden; background: #0d0d1a; }
     .diff-toolbar { display: flex; align-items: center; gap: 8px; padding: 6px 12px; background: #1a1a32; border-bottom: 1px solid #2a2a44; flex-shrink: 0; }
-    .diff-title { font-size: 11px; font-weight: 700; color: #a78bfa; }
+    .diff-title { font-size: 11px; font-weight: 700; color: #a78bfa; display: flex; align-items: center; gap: 8px; }
+    .diff-count { font-weight: 500; font-size: 10px; color: #6a6a8a; }
+    .added-count { color: #34d399; }
+    .removed-count { color: #f87171; }
     .diff-btn { padding: 4px 12px; border: none; border-radius: 4px; font-size: 10px; font-weight: 600; cursor: pointer; font-family: 'Inter',sans-serif; }
     .diff-btn.accept { background: rgba(16,185,129,0.2); color: #34d399; }
     .diff-btn.accept:hover { background: rgba(16,185,129,0.3); }
@@ -812,6 +930,54 @@ import { FileSystemService } from './services/file-system.service';
     .bp-tab-actions { margin-left: auto; display: flex; gap: 4px; }
 
     /* ACTIVITY BAR */
+    /* Source Control Panel */
+    .sc-panel { width: 300px; background: #0c0c1e; border-right: 1px solid #1a1a30; display: flex; flex-direction: column; flex-shrink: 0; font-size: 13px; overflow: hidden; }
+    .sc-header { display: flex; align-items: center; padding: 8px 12px; border-bottom: 1px solid #1a1a30; gap: 4px; }
+    .sc-title { flex: 1; color: #c0c0d8; font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; }
+    .sc-icon-btn { background: none; border: none; color: #8888a8; cursor: pointer; padding: 4px 8px; border-radius: 4px; font-size: 16px; line-height: 1; }
+    .sc-icon-btn:hover { background: rgba(255,255,255,0.06); color: #e0e0f0; }
+    .sc-empty { padding: 24px 16px; text-align: center; color: #6a6a8a; font-size: 12px; }
+    .sc-empty p { margin: 0 0 12px; }
+    .sc-branch { display: flex; align-items: center; gap: 6px; padding: 8px 12px; color: #818cf8; font-size: 12px; border-bottom: 1px solid #1a1a30; }
+    .sc-remote { color: #6a6a8a; font-size: 11px; }
+    .sc-ahead, .sc-behind { background: rgba(129,140,248,0.15); color: #a5b4fc; padding: 1px 6px; border-radius: 8px; font-size: 10px; font-family: monospace; }
+    .sc-commit { padding: 10px; border-bottom: 1px solid #1a1a30; }
+    .sc-msg { width: 100%; background: #060614; border: 1px solid #2a2a44; border-radius: 6px; color: #e0e0f0; padding: 8px 10px; font-size: 12px; resize: vertical; outline: none; font-family: 'Inter', sans-serif; box-sizing: border-box; }
+    .sc-msg:focus { border-color: #818cf8; }
+    .sc-actions { display: flex; gap: 6px; margin-top: 8px; }
+    .sc-sync { display: flex; gap: 6px; padding: 8px 10px; border-bottom: 1px solid #1a1a30; }
+    .sc-sync .sc-btn { flex: 1; }
+    .sc-btn { padding: 6px 12px; background: rgba(255,255,255,0.05); border: 1px solid #2a2a44; border-radius: 5px; color: #c0c0d8; font-size: 11px; cursor: pointer; font-family: 'Inter', sans-serif; flex: 1; }
+    .sc-btn:hover:not(:disabled) { background: rgba(129,140,248,0.15); border-color: #818cf8; color: #fff; }
+    .sc-btn.primary { background: linear-gradient(135deg, #6366f1, #8b5cf6); border-color: transparent; color: #fff; font-weight: 600; }
+    .sc-btn.primary:hover:not(:disabled) { filter: brightness(1.1); }
+    .sc-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .sc-no-remote { padding: 12px; border-bottom: 1px solid #1a1a30; }
+    .sc-no-remote p { margin: 0 0 8px; color: #8888a8; font-size: 11px; }
+    .sc-remote-add { display: flex; flex-direction: column; gap: 6px; }
+    .sc-remote-add input { padding: 6px 10px; background: #060614; border: 1px solid #2a2a44; border-radius: 4px; color: #e0e0f0; font-size: 11px; font-family: 'JetBrains Mono', monospace; outline: none; }
+    .sc-remote-add input:focus { border-color: #818cf8; }
+    .sc-status-msg { padding: 8px 12px; background: rgba(16,185,129,0.1); color: #34d399; font-size: 11px; border-bottom: 1px solid #1a1a30; }
+    .sc-status-msg.error { background: rgba(239,68,68,0.1); color: #f87171; }
+    .sc-group { border-bottom: 1px solid #1a1a30; }
+    .sc-group-head { display: flex; align-items: center; justify-content: space-between; padding: 6px 12px; background: #080818; color: #a0a0c0; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
+    .sc-file { display: flex; align-items: center; gap: 6px; padding: 4px 12px; cursor: pointer; font-size: 12px; }
+    .sc-file:hover { background: rgba(255,255,255,0.04); }
+    .sc-file-icon { width: 14px; height: 14px; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 10px; border-radius: 3px; flex-shrink: 0; font-family: monospace; }
+    .sc-file-icon.staged { background: rgba(52,211,153,0.2); color: #34d399; }
+    .sc-file-icon.status-modified { background: rgba(245,158,11,0.2); color: #fbbf24; }
+    .sc-file-icon.status-untracked { background: rgba(129,140,248,0.2); color: #a5b4fc; }
+    .sc-file-icon.status-added { background: rgba(52,211,153,0.2); color: #34d399; }
+    .sc-file-icon.status-deleted { background: rgba(239,68,68,0.2); color: #f87171; }
+    .sc-file-icon.status-renamed { background: rgba(139,92,246,0.2); color: #a78bfa; }
+    .sc-file-icon.status-conflict { background: rgba(239,68,68,0.3); color: #fca5a5; }
+    .sc-file-name { flex: 1; color: #c0c0d8; font-family: 'JetBrains Mono', monospace; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .sc-file-status { font-size: 10px; color: #6a6a8a; font-weight: 600; }
+    .sc-mini-btn { background: none; border: none; color: #6a6a8a; cursor: pointer; padding: 0 4px; font-size: 14px; line-height: 1; opacity: 0; transition: opacity 0.1s; border-radius: 3px; }
+    .sc-file:hover .sc-mini-btn, .sc-group-head:hover .sc-mini-btn { opacity: 1; }
+    .sc-mini-btn:hover { background: rgba(129,140,248,0.2); color: #fff; }
+    .sc-mini-btn.discard:hover { background: rgba(239,68,68,0.2); color: #fca5a5; }
+
     .activity-bar {
       width: 44px; background: #080816; border-right: 1px solid #141428; display: flex;
       flex-direction: column; align-items: center; padding: 8px 0; gap: 4px; flex-shrink: 0;
@@ -978,7 +1144,22 @@ import { FileSystemService } from './services/file-system.service';
     .ai-msg-ai .ai-msg-body { padding: 2px 0; }
     .ai-msg-text { font-size: 12.5px; color: #c8c8e0; line-height: 1.65; white-space: pre-wrap; word-break: break-word; }
     :host ::ng-deep .ai-msg-text strong { color: #e0e0f0; font-weight: 600; }
+    :host ::ng-deep .ai-msg-text em { color: #d0d0e8; font-style: italic; }
+    :host ::ng-deep .ai-msg-text .ai-h1 { font-size: 18px; font-weight: 700; color: #fff; margin: 14px 0 8px; }
+    :host ::ng-deep .ai-msg-text .ai-h2 { font-size: 15px; font-weight: 700; color: #fff; margin: 12px 0 6px; }
+    :host ::ng-deep .ai-msg-text .ai-h3 { font-size: 13.5px; font-weight: 600; color: #e0e0f0; margin: 10px 0 4px; }
     :host ::ng-deep .ai-msg-text code { background: rgba(129,140,248,0.08); padding: 2px 5px; border-radius: 4px; font-family: 'JetBrains Mono',monospace; font-size: 11px; color: #a78bfa; border: 1px solid rgba(129,140,248,0.1); }
+    :host ::ng-deep .ai-msg-text .code-block { background: #0a0a1a; border: 1px solid #1f1f35; border-radius: 10px; margin: 10px 0; overflow: hidden; white-space: normal; cursor: text; }
+    :host ::ng-deep .ai-msg-text .code-block-head { display: flex; align-items: center; justify-content: space-between; padding: 6px 12px; background: #14142a; border-bottom: 1px solid #1f1f35; }
+    :host ::ng-deep .ai-msg-text .code-block-lang { font-size: 10px; color: #8888a8; text-transform: uppercase; letter-spacing: 1px; font-family: 'JetBrains Mono', monospace; font-weight: 600; }
+    :host ::ng-deep .ai-msg-text .code-block-copy { padding: 4px 12px; background: rgba(129,140,248,0.12); border: 1px solid rgba(129,140,248,0.25); border-radius: 5px; color: #a5b4fc; font-size: 11px; cursor: pointer !important; font-family: 'Inter', sans-serif; font-weight: 600; transition: all 0.15s; user-select: none; -webkit-user-select: none; pointer-events: auto; outline: none; }
+    :host ::ng-deep .ai-msg-text .code-block-copy * { cursor: pointer !important; pointer-events: none; }
+    :host ::ng-deep .ai-msg-text .code-block-copy:hover { background: rgba(129,140,248,0.22); border-color: #818cf8; color: #fff; }
+    :host ::ng-deep .ai-msg-text .code-block-copy:active { transform: scale(0.96); }
+    :host ::ng-deep .ai-msg-text .code-block-copy.copied { background: rgba(52,211,153,0.2); border-color: #34d399; color: #6ee7b7; }
+    :host ::ng-deep .ai-msg-text .code-block-copy.failed { background: rgba(239,68,68,0.2); border-color: #f87171; color: #fca5a5; }
+    :host ::ng-deep .ai-msg-text .code-block-body { background: #0a0a1a; padding: 12px 14px; margin: 0; overflow-x: auto; font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 1.6; color: #d8d8e8; border: none; }
+    :host ::ng-deep .ai-msg-text .code-block-body code { background: none; border: none; padding: 0; color: inherit; font-size: inherit; }
 
     /* Thinking */
     .ai-thinking { margin-bottom: 8px; cursor: pointer; }
@@ -1090,7 +1271,7 @@ export class ScannerIdeComponent implements OnInit, AfterViewChecked {
   terminalInput = '';
   ctxMenu = { show: false, x: 0, y: 0, node: null as FolderNode | null };
   cursorLine = 1;
-  aiPanelOpen = false;
+  aiPanelOpen = true;
   aiIssue = '';
   editorDiffMode = false;
   editorDiffLines: { type: string; lineNum: number; text: string }[] = [];
@@ -1108,6 +1289,12 @@ export class ScannerIdeComponent implements OnInit, AfterViewChecked {
   showNewProjectDialog = false;
   newProjectName = '';
   newProjectPath = '';
+  // Source control state
+  scPanelOpen = false;
+  commitMessage = '';
+  remoteUrl = '';
+  gitStatusMsg = '';
+  gitStatusError = false;
   private pendingFileArray: File[] = [];
 
   report: Signal<ProjectReport | null>;
@@ -1126,6 +1313,7 @@ export class ScannerIdeComponent implements OnInit, AfterViewChecked {
     private highlighter: SyntaxHighlightService,
     public ai: AIEngineService,
     public fs: FileSystemService,
+    public git: GitService,
     private cdr: ChangeDetectorRef
   ) {
     this.report = this.scanner.report;
@@ -1151,9 +1339,37 @@ export class ScannerIdeComponent implements OnInit, AfterViewChecked {
       const count = this.editedCode.split('\n').length;
       return Array.from({ length: count }, (_, i) => i);
     });
+
+    // React whenever selected file OR report changes (via click OR programmatic AI enhancement/scaffold)
+    effect(() => {
+      const file = this.selectedFile();
+      const pendingMap = this.scanner.pendingDiffs();
+      // Also read report signal to re-run when report changes even if same file path
+      const _report = this.scanner.report();
+      if (!file) return;
+
+      // Force sync editor content from the latest file data
+      this.editedCode = file.content;
+      this.updateHighlight(file.extension);
+
+      // Check if this file has a pending enhancement diff → show green/red highlights
+      const original = pendingMap.get(file.path);
+      if (original && original !== file.content) {
+        this.editorOriginalCode = original;
+        this.editorDiffFile = file.path;
+        this.editorDiffLines = this.ai.calculateDiff(original, file.content);
+        this.editorDiffMode = true;
+      } else if (this.editorDiffFile === file.path && !original) {
+        // Diff was accepted/cleared → exit diff mode
+        this.editorDiffMode = false;
+      }
+    });
   }
 
   ngOnInit(): void {
+    // Attach copy-button listener immediately (works even before any chat message renders)
+    this.ensureCopyListener();
+
     if (!this.scanner.report()) {
       // No project loaded — sidebar shows "Open Folder" button automatically
       return;
@@ -1287,6 +1503,184 @@ export class ScannerIdeComponent implements OnInit, AfterViewChecked {
     this.aiPanelOpen = true;
   }
 
+  // ===== SOURCE CONTROL =====
+
+  toggleSourceControl(): void {
+    this.scPanelOpen = !this.scPanelOpen;
+    if (this.scPanelOpen) {
+      this.sidebarCollapsed = true; // collapse explorer to make room
+      this.refreshGit();
+    } else {
+      this.sidebarCollapsed = false;
+    }
+  }
+
+  async refreshGit(): Promise<void> {
+    const cwd = this.scanner.projectBasePath();
+    if (!cwd) {
+      this.gitStatusMsg = 'Open a folder on disk first (New Empty Project with a disk path)';
+      this.gitStatusError = true;
+      return;
+    }
+    this.gitStatusMsg = '';
+    await this.git.refresh(cwd);
+  }
+
+  async initGit(): Promise<void> {
+    const cwd = this.scanner.projectBasePath();
+    if (!cwd) return;
+    const ok = await this.git.init(cwd);
+    this.showGitMessage(ok ? 'Initialized git repo' : 'Init failed', !ok);
+    await this.refreshGit();
+  }
+
+  stagedFiles() {
+    return this.git.status()?.files.filter(f => f.staged) || [];
+  }
+
+  unstagedFiles() {
+    return this.git.status()?.files.filter(f => !f.staged) || [];
+  }
+
+  hasUnstaged(): boolean {
+    return this.unstagedFiles().length > 0;
+  }
+
+  hasUpstream(): boolean {
+    const s = this.git.status();
+    return !!(s?.remote && (s.ahead > 0 || s.behind > 0 || (s.ahead === 0 && s.behind === 0)));
+  }
+
+  shortRemote(): string {
+    const r = this.git.status()?.remote || '';
+    const m = r.match(/[:/]([^/:]+\/[^/]+?)(?:\.git)?$/);
+    return m ? m[1] : r;
+  }
+
+  statusLetter(status: string): string {
+    const map: Record<string, string> = { modified: 'M', added: 'A', deleted: 'D', untracked: 'U', renamed: 'R', conflict: 'C' };
+    return map[status] || '?';
+  }
+
+  async doStage(file: string): Promise<void> {
+    const cwd = this.scanner.projectBasePath();
+    if (!cwd) return;
+    await this.git.stage(cwd, [file]);
+    await this.refreshGit();
+  }
+
+  async doStageAll(): Promise<void> {
+    const cwd = this.scanner.projectBasePath();
+    if (!cwd) return;
+    await this.git.stage(cwd);
+    await this.refreshGit();
+  }
+
+  async doUnstage(file: string): Promise<void> {
+    const cwd = this.scanner.projectBasePath();
+    if (!cwd) return;
+    await this.git.unstage(cwd, [file]);
+    await this.refreshGit();
+  }
+
+  async doUnstageAll(): Promise<void> {
+    const cwd = this.scanner.projectBasePath();
+    if (!cwd) return;
+    await this.git.unstage(cwd);
+    await this.refreshGit();
+  }
+
+  async doDiscard(file: string): Promise<void> {
+    if (!confirm(`Discard changes in ${file}?`)) return;
+    const cwd = this.scanner.projectBasePath();
+    if (!cwd) return;
+    await this.git.discard(cwd, file);
+    await this.refreshGit();
+  }
+
+  async doCommit(): Promise<void> {
+    const cwd = this.scanner.projectBasePath();
+    if (!cwd || !this.commitMessage.trim()) return;
+
+    // Auto-stage if nothing staged
+    if (this.stagedFiles().length === 0) {
+      await this.git.stage(cwd);
+    }
+
+    const res = await this.git.commit(
+      cwd,
+      this.commitMessage.trim(),
+      'IDE User',
+      'ide-user@local'
+    );
+
+    if (res.ok) {
+      this.showGitMessage(`Committed: "${this.commitMessage.trim().slice(0, 50)}"`);
+      this.commitMessage = '';
+    } else {
+      this.showGitMessage(res.error || 'Commit failed', true);
+    }
+    await this.refreshGit();
+  }
+
+  async doPush(): Promise<void> {
+    const cwd = this.scanner.projectBasePath();
+    if (!cwd) return;
+    this.showGitMessage('Pushing...');
+    const res = await this.git.push(cwd);
+    this.showGitMessage(res.ok ? 'Pushed successfully' : (res.error || 'Push failed'), !res.ok);
+    await this.refreshGit();
+  }
+
+  async doPushUpstream(): Promise<void> {
+    const cwd = this.scanner.projectBasePath();
+    if (!cwd) return;
+    this.showGitMessage('Pushing (with upstream)...');
+    const branch = this.git.status()?.branch || 'main';
+    const res = await this.git.push(cwd, 'origin', branch, true);
+    this.showGitMessage(res.ok ? 'Pushed & set upstream' : (res.error || 'Push failed'), !res.ok);
+    await this.refreshGit();
+  }
+
+  async doPull(): Promise<void> {
+    const cwd = this.scanner.projectBasePath();
+    if (!cwd) return;
+    this.showGitMessage('Pulling...');
+    const branch = this.git.status()?.branch || 'main';
+    const res = await this.git.pull(cwd, 'origin', branch);
+    this.showGitMessage(res.ok ? 'Pulled' : (res.error || 'Pull failed'), !res.ok);
+    await this.refreshGit();
+  }
+
+  async addRemote(): Promise<void> {
+    const cwd = this.scanner.projectBasePath();
+    if (!cwd || !this.remoteUrl.trim()) return;
+    const ok = await this.git.addRemote(cwd, 'origin', this.remoteUrl.trim());
+    this.showGitMessage(ok ? 'Remote added' : 'Failed to add remote', !ok);
+    if (ok) this.remoteUrl = '';
+    await this.refreshGit();
+  }
+
+  openGitFile(path: string): void {
+    // Try to find the file in the scanner and open it
+    const cwd = this.scanner.projectBasePath();
+    const report = this.scanner.report();
+    if (!report) return;
+    const folderName = report.tree?.name || '';
+    const match = report.files.find(f =>
+      f.path === folderName + '/' + path ||
+      f.path.endsWith('/' + path) ||
+      f.path === path
+    );
+    if (match) this.scanner.selectedFilePath.set(match.path);
+  }
+
+  private showGitMessage(msg: string, error = false): void {
+    this.gitStatusMsg = msg;
+    this.gitStatusError = error;
+    setTimeout(() => { if (this.gitStatusMsg === msg) this.gitStatusMsg = ''; }, 4000);
+  }
+
   private async findBackendPort(): Promise<number> {
     for (let p = 4100; p <= 4106; p++) {
       try {
@@ -1399,7 +1793,29 @@ export class ScannerIdeComponent implements OnInit, AfterViewChecked {
         this.editedCode = file.content;
         this.updateHighlight(file.extension);
         this.runner.clearBreakpoints();
+        // Auto-show diff if there's a pending enhancement for this file
+        this.checkPendingDiff(file);
       }
+    }
+  }
+
+  diffAddedCount(): number {
+    return this.editorDiffLines.filter(l => l.type === 'add').length;
+  }
+  diffRemovedCount(): number {
+    return this.editorDiffLines.filter(l => l.type === 'remove').length;
+  }
+
+  /** If this file has a pending enhancement diff, open the diff view. */
+  checkPendingDiff(file: ProjectFile): void {
+    const original = this.scanner.getPendingOriginal(file.path);
+    if (original && original !== file.content) {
+      this.editorOriginalCode = original;
+      this.editorDiffFile = file.path;
+      this.editorDiffLines = this.ai.calculateDiff(original, file.content);
+      this.editorDiffMode = true;
+    } else {
+      this.editorDiffMode = false;
     }
   }
 
@@ -1616,8 +2032,8 @@ export class ScannerIdeComponent implements OnInit, AfterViewChecked {
   async aiSend(text?: string): Promise<void> {
     const input = text || this.aiIssue;
     if (!input.trim()) return;
-    const report = this.report();
-    if (!report) return;
+    // Use an empty report if no folder is open — AI still works for Q&A, math, algorithms, etc.
+    const report = this.report() || this.scanner.createEmptyReport('workspace');
     this.aiIssue = '';
     this.ai.projectBasePath = this.scanner.projectBasePath();
     this.ai.injectScanner(this.scanner);
@@ -1633,7 +2049,7 @@ export class ScannerIdeComponent implements OnInit, AfterViewChecked {
         this.openDiffInEditor(firstArt.file, firstArt.originalContent, firstArt.content);
       } else if (firstArt.content) {
         // Find the file in the report (AI engine already added it)
-        const file = this.scanner.report()?.files.find(f => f.name === firstArt.title);
+        const file = this.scanner.report()?.files.find(f => f.name === firstArt.title || f.path.endsWith('/' + firstArt.title));
         if (file) {
           this.scanner.selectedFilePath.set(file.path);
           this.editedCode = file.content;
@@ -1685,12 +2101,214 @@ export class ScannerIdeComponent implements OnInit, AfterViewChecked {
     }
   }
 
-  formatAiText(text: string): string {
-    return text
-      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-      .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-      .replace(/`([^`]+)`/g, '<code>$1</code>')
+  /**
+   * Parse a message into segments: plain text and fenced code blocks.
+   * Each segment renders as a real Angular element with proper bindings.
+   */
+  parseMessage(text: string): { type: 'text' | 'code'; lang: string; content: string }[] {
+    const segments: { type: 'text' | 'code'; lang: string; content: string }[] = [];
+    const regex = /```(\w+)?\n?([\s\S]*?)```/g;
+    let lastIndex = 0;
+    let match: RegExpExecArray | null;
+
+    while ((match = regex.exec(text)) !== null) {
+      if (match.index > lastIndex) {
+        segments.push({ type: 'text', lang: '', content: text.slice(lastIndex, match.index) });
+      }
+      segments.push({ type: 'code', lang: (match[1] || 'text').toLowerCase(), content: match[2] });
+      lastIndex = match.index + match[0].length;
+    }
+
+    if (lastIndex < text.length) {
+      segments.push({ type: 'text', lang: '', content: text.slice(lastIndex) });
+    }
+
+    // If no code blocks found, return the whole thing as one text segment
+    if (segments.length === 0) {
+      segments.push({ type: 'text', lang: '', content: text });
+    }
+
+    return segments;
+  }
+
+  trackSeg(i: number, seg: { type: string; content: string }): string {
+    return seg.type + i + seg.content.slice(0, 20);
+  }
+
+  /**
+   * Format inline text (no code blocks) — markdown-ish: bold, italic, inline code, headings.
+   */
+  formatInlineText(text: string): string {
+    const escape = (s: string) => s
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    let out = escape(text);
+    out = out
+      .replace(/^###\s+(.+)$/gm, '<h3 class="ai-h3">$1</h3>')
+      .replace(/^##\s+(.+)$/gm, '<h2 class="ai-h2">$1</h2>')
+      .replace(/^#\s+(.+)$/gm, '<h1 class="ai-h1">$1</h1>')
+      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+      .replace(/`([^`\n]+)`/g, '<code>$1</code>')
+      .replace(/(?<!\*)\*(?!\*)([^*\n]+?)\*(?!\*)/g, '<em>$1</em>')
       .replace(/\n/g, '<br>');
+    return out;
+  }
+
+  /**
+   * Copy code to clipboard with fallback for non-secure contexts.
+   */
+  copyToClipboard(text: string, event: Event): void {
+    const btn = event.target as HTMLElement;
+    const showResult = (ok: boolean) => {
+      const original = btn.dataset['origText'] || btn.textContent || 'Copy';
+      btn.dataset['origText'] = original;
+      btn.textContent = ok ? 'Copied!' : 'Failed';
+      btn.classList.toggle('copied', ok);
+      btn.classList.toggle('failed', !ok);
+      setTimeout(() => {
+        btn.textContent = 'Copy';
+        btn.classList.remove('copied', 'failed');
+      }, 1500);
+    };
+
+    if (navigator.clipboard?.writeText && window.isSecureContext) {
+      navigator.clipboard.writeText(text).then(() => showResult(true)).catch(() => {
+        this._fallbackCopy(text, () => showResult(true), () => showResult(false));
+      });
+    } else {
+      this._fallbackCopy(text, () => showResult(true), () => showResult(false));
+    }
+  }
+
+  formatAiText(text: string): string {
+    // 1. First, extract fenced code blocks so we don't mangle them in other replacements.
+    //    Replace each block with a placeholder, convert to HTML at the end.
+    const blocks: { lang: string; code: string }[] = [];
+    let placeholderIdx = 0;
+    let working = text.replace(/```(\w+)?\n?([\s\S]*?)```/g, (_m, lang, code) => {
+      const i = placeholderIdx++;
+      blocks.push({ lang: (lang || 'text').toLowerCase(), code });
+      return `__CODEBLOCK_${i}__`;
+    });
+
+    // 2. HTML-escape the rest
+    const escape = (s: string) => s
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+    working = escape(working);
+
+    // 3. Markdown-ish inline formatting on non-code text
+    working = working
+      // Headings: ### H3, ## H2, # H1
+      .replace(/^###\s+(.+)$/gm, '<h3 class="ai-h3">$1</h3>')
+      .replace(/^##\s+(.+)$/gm, '<h2 class="ai-h2">$1</h2>')
+      .replace(/^#\s+(.+)$/gm, '<h1 class="ai-h1">$1</h1>')
+      // Bold **x**
+      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+      // Inline code `x`
+      .replace(/`([^`\n]+)`/g, '<code>$1</code>')
+      // Italic *x*  (simple, non-greedy)
+      .replace(/(?<!\*)\*(?!\*)([^*\n]+?)\*(?!\*)/g, '<em>$1</em>')
+      // Newlines
+      .replace(/\n/g, '<br>');
+
+    // 4. Restore code blocks as <pre> with copy button (event delegation handles click)
+    working = working.replace(/__CODEBLOCK_(\d+)__/g, (_m, i) => {
+      const { lang, code } = blocks[Number(i)];
+      const safeCode = escape(code);
+      // Store the raw code in a hidden span so event delegation can retrieve it by index
+      const id = `__codeblock_${this._codeBlockCounter++}__`;
+      this._codeBlockStore.set(id, code);
+      return `<div class="code-block" data-code-id="${id}">
+        <div class="code-block-head">
+          <span class="code-block-lang">${lang}</span>
+          <button class="code-block-copy" type="button" data-copy-for="${id}">Copy</button>
+        </div>
+        <pre class="code-block-body"><code>${safeCode}</code></pre>
+      </div>`;
+    });
+
+    return working;
+  }
+
+  private _codeBlockCounter = 0;
+  private _codeBlockStore = new Map<string, string>();
+  private _copyListenerAttached = false;
+
+  /** Attach a single document-level click listener that handles copy buttons anywhere. */
+  private ensureCopyListener(): void {
+    if (this._copyListenerAttached) return;
+    this._copyListenerAttached = true;
+    document.addEventListener('click', (event) => {
+      const target = event.target as HTMLElement;
+      if (!target) return;
+      // Button might have descendant text — find the nearest copy button
+      const btn = target.closest?.('.code-block-copy') as HTMLElement | null;
+      if (!btn) return;
+      const id = btn.getAttribute('data-copy-for');
+      if (!id) return;
+      const code = this._codeBlockStore.get(id);
+      if (code === undefined) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+      this._copyToClipboard(code, btn);
+    }, true); // capture phase so other handlers can't block
+  }
+
+  /**
+   * Copy to clipboard with fallback.
+   * Tries modern Clipboard API first; falls back to textarea + execCommand
+   * for non-secure contexts (http://192.168.x.x, etc.)
+   */
+  private _copyToClipboard(text: string, btn: HTMLElement): void {
+    const showResult = (ok: boolean) => {
+      const original = btn.dataset['origText'] || btn.textContent || 'Copy';
+      btn.dataset['origText'] = original;
+      btn.textContent = ok ? 'Copied!' : 'Failed';
+      btn.classList.toggle('copied', ok);
+      btn.classList.toggle('failed', !ok);
+      setTimeout(() => {
+        btn.textContent = original;
+        btn.classList.remove('copied', 'failed');
+      }, 1500);
+    };
+
+    // Modern API (requires secure context)
+    if (navigator.clipboard?.writeText && window.isSecureContext) {
+      navigator.clipboard.writeText(text).then(() => showResult(true)).catch(() => {
+        // Fall back if API throws
+        this._fallbackCopy(text, () => showResult(true), () => showResult(false));
+      });
+      return;
+    }
+
+    // Fallback for insecure contexts
+    this._fallbackCopy(text, () => showResult(true), () => showResult(false));
+  }
+
+  private _fallbackCopy(text: string, onSuccess: () => void, onFail: () => void): void {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.left = '-9999px';
+      ta.style.top = '0';
+      ta.setAttribute('readonly', '');
+      document.body.appendChild(ta);
+      ta.select();
+      ta.setSelectionRange(0, text.length);
+      const ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      ok ? onSuccess() : onFail();
+    } catch {
+      onFail();
+    }
+  }
+
+  /** Kept for backward compatibility; the panel-level handler is still attached in template. */
+  onAiPanelClick(_event: Event): void {
+    // No-op — actual handling done by the document-level listener below (more reliable).
+    this.ensureCopyListener();
   }
 
   getDiff(art: import('./services/ai-engine.service').Artifact): { type: string; lineNum: number; text: string }[] {
@@ -1720,10 +2338,19 @@ export class ScannerIdeComponent implements OnInit, AfterViewChecked {
           this.runner.addLine('info', `Written to disk: ${fullPath}`);
         }
       } else if (basePath) {
-        // New file — create it on disk
+        // New file — create parent folders and file on disk
         const fullPath = basePath + '\\' + art.title.replace(/\//g, '\\');
+        const parts = art.title.replace(/\\/g, '/').split('/');
+        if (parts.length > 1) {
+          for (let i = 1; i < parts.length; i++) {
+            const folderPath = basePath + '\\' + parts.slice(0, i).join('\\');
+            await this.fs.createFolder(folderPath);
+          }
+        }
         await this.fs.writeFile(fullPath, art.content);
         this.runner.addLine('info', `Created: ${fullPath}`);
+        // Add to IDE file tree so it appears in explorer
+        this.scanner.addFileToReport(fullPath, art.content);
         // Show in editor
         this.editedCode = art.content;
         this.highlightedCode = this.highlighter.highlight(art.content, art.language) + '\n';
@@ -1731,8 +2358,18 @@ export class ScannerIdeComponent implements OnInit, AfterViewChecked {
     } else if (basePath && art.title) {
       // No file path but has a title — create as new file
       const fullPath = basePath + '\\' + art.title.replace(/\//g, '\\');
+      // Create parent folders first
+      const parts = art.title.replace(/\\/g, '/').split('/');
+      if (parts.length > 1) {
+        for (let i = 1; i < parts.length; i++) {
+          const folderPath = basePath + '\\' + parts.slice(0, i).join('\\');
+          await this.fs.createFolder(folderPath);
+        }
+      }
       await this.fs.writeFile(fullPath, art.content);
       this.runner.addLine('info', `Created: ${fullPath}`);
+      // Add to IDE file tree so it appears in explorer
+      this.scanner.addFileToReport(fullPath, art.content);
       this.editedCode = art.content;
       this.highlightedCode = this.highlighter.highlight(art.content, art.language) + '\n';
     }
@@ -1786,32 +2423,59 @@ export class ScannerIdeComponent implements OnInit, AfterViewChecked {
   }
 
   async acceptDiff(): Promise<void> {
+    const filePath = this.editorDiffFile;
     // Apply new code to editor
     this.editorDiffMode = false;
     this.updateHighlight();
 
-    // Write to disk if connected
+    // Clear pending diff (so reselecting the file won't re-open the diff view)
+    if (filePath) this.scanner.acceptPendingDiff(filePath);
+
+    // Write to disk if connected (enhancement applied already wrote, but re-save in case user edited)
     const basePath = this.scanner.projectBasePath();
-    if (basePath && this.fs.connected() && this.editorDiffFile) {
-      const file = this.scanner.report()?.files.find(f => f.path === this.editorDiffFile);
+    if (basePath && this.fs.connected() && filePath) {
+      const file = this.scanner.report()?.files.find(f => f.path === filePath);
       if (file) {
         const fullPath = this.getNodeFullPath({ path: file.path, name: file.name, type: 'file', extension: file.extension, children: [], issues: 0, expanded: false });
         await this.fs.writeFile(fullPath, this.editedCode);
-        this.runner.addLine('info', `Saved: ${fullPath}`);
+        this.runner.addLine('info', `Accepted & saved: ${fullPath}`);
       }
     }
     this.editorDiffFile = '';
     this.editorOriginalCode = '';
   }
 
-  rejectDiff(): void {
-    // Revert to original code
-    this.editedCode = this.editorOriginalCode;
+  async rejectDiff(): Promise<void> {
+    const filePath = this.editorDiffFile;
+    const original = this.editorOriginalCode;
+    // Revert in editor
+    this.editedCode = original;
     this.editorDiffMode = false;
     this.updateHighlight();
+
+    // Revert in scanner (report.files)
+    if (filePath && original) {
+      const report = this.scanner.report();
+      if (report) {
+        const updated = report.files.map(f => f.path === filePath ? { ...f, content: original, size: original.length } : f);
+        const tree = this.scanner.buildTree(updated);
+        if (report.tree?.name) { tree.name = report.tree.name; tree.path = report.tree.path; }
+        this.scanner.report.set({ ...report, files: updated, tree });
+      }
+      // Revert on disk
+      const basePath = this.scanner.projectBasePath();
+      if (basePath && this.fs.connected()) {
+        const file = this.scanner.report()?.files.find(f => f.path === filePath);
+        if (file) {
+          const fullPath = this.getNodeFullPath({ path: file.path, name: file.name, type: 'file', extension: file.extension, children: [], issues: 0, expanded: false });
+          await this.fs.writeFile(fullPath, original);
+          this.runner.addLine('info', `Reverted: ${fullPath}`);
+        }
+      }
+      this.scanner.acceptPendingDiff(filePath); // clear the pending diff marker
+    }
     this.editorDiffFile = '';
     this.editorOriginalCode = '';
-    this.runner.addLine('info', 'Changes reverted');
   }
 
   closeDiff(): void {

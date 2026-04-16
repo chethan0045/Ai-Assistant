@@ -16,7 +16,11 @@
       "Bash(netstat -ano)",
       "Bash(findstr :4100)",
       "Bash(rm -rf /c/Users/c6191/Desktop/test-angular)",
-      "Bash(mkdir /c/Users/c6191/Desktop/test-angular)"
+      "Bash(mkdir /c/Users/c6191/Desktop/test-angular)",
+      "Bash(wc *)",
+      "Bash(grep -E \"\\\\.\\(js|ts\\)$\")",
+      "Bash(git diff *)",
+      "Bash(git add *)"
     ]
   }
 }

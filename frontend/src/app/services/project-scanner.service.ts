@@ -57,6 +57,31 @@ export class ProjectScannerService {
   readonly selectedFilePath = signal<string | null>(null);
   readonly projectBasePath = signal<string>('');
 
+  /**
+   * Pending enhancement diffs: filePath → original content (before the enhancement was applied).
+   * Used to show green/red diff highlights in the editor until the user accepts or undoes.
+   */
+  readonly pendingDiffs = signal<Map<string, string>>(new Map());
+
+  /** Record an original version of a file when an enhancement is about to overwrite it. */
+  markPendingDiff(filePath: string, originalContent: string): void {
+    const next = new Map(this.pendingDiffs());
+    if (!next.has(filePath)) next.set(filePath, originalContent);
+    this.pendingDiffs.set(next);
+  }
+
+  /** Accept: clear diff, keep the new content. */
+  acceptPendingDiff(filePath: string): void {
+    const next = new Map(this.pendingDiffs());
+    next.delete(filePath);
+    this.pendingDiffs.set(next);
+  }
+
+  /** Get the original content for a file, or null if no pending diff. */
+  getPendingOriginal(filePath: string): string | null {
+    return this.pendingDiffs().get(filePath) || null;
+  }
+
   private supportedExtensions = new Set([
     'ts', 'js', 'jsx', 'tsx', 'html', 'css', 'scss', 'json',
     'py', 'java', 'go', 'rs', 'rb', 'php', 'vue', 'svelte',

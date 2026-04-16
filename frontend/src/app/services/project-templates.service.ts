@@ -36,6 +36,8 @@ export class ProjectTemplatesService {
       'fullstack': () => this.angularFullStack(),
       'add-otp': () => this.addOtpTemplate(),
       'otp': () => this.addOtpTemplate(),
+      'add-login': () => this.addLoginTemplate(),
+      'add-auth': () => this.addLoginTemplate(),
       'angular-todo': () => this.angularTodoApp(),
       'todo': () => this.angularTodoApp(),
       'angular-counter': () => this.angularCounterApp(),
@@ -73,6 +75,12 @@ export class ProjectTemplatesService {
    */
   detectTemplate(input: string): string | null {
     const q = input.toLowerCase();
+
+    // Add login/auth to existing project
+    const isAdd = q.includes('add') || q.includes('include') || q.includes('wire') || q.includes('integrate');
+    if (isAdd && /\b(login|auth|authentication|sign\s*in|register|signup)\b/i.test(q) && /\b(page|screen|component|to\s+this|to\s+my|to\s+project)\b/i.test(q)) {
+      return 'add-login';
+    }
 
     // OTP addition (modifies existing project)
     const wantsOtp = q.includes('otp') || q.includes('verify email') || q.includes('email verification') || q.includes('verification code');
@@ -201,6 +209,213 @@ coverage/
    * Add OTP verification — modifies/adds files in an existing project
    * to wire email OTP verification on registration.
    */
+  private addLoginTemplate(): ProjectTemplate {
+    return {
+      id: 'add-login',
+      name: 'Login + Register Page (patch)',
+      description: 'Adds login, register, auth service, guard, and interceptor to an existing Angular project',
+      files: [
+        {
+          path: 'src/app/services/auth.service.ts',
+          content: `import { Injectable, signal, computed, inject } from '@angular/core';
+import { HttpClient } from '@angular/common/http';
+import { Router } from '@angular/router';
+import { Observable, tap } from 'rxjs';
+
+export interface User { _id?: string; name: string; email: string; }
+
+@Injectable({ providedIn: 'root' })
+export class AuthService {
+  private http = inject(HttpClient);
+  private router = inject(Router);
+  private apiUrl = 'http://localhost:4100/api/auth';
+
+  currentUser = signal<User | null>(null);
+  token = signal<string | null>(null);
+  isLoggedIn = computed(() => !!this.token());
+
+  constructor() {
+    const t = localStorage.getItem('token');
+    const u = localStorage.getItem('user');
+    if (t && u) { this.token.set(t); this.currentUser.set(JSON.parse(u)); }
+  }
+
+  register(name: string, email: string, password: string): Observable<any> {
+    return this.http.post(this.apiUrl + '/register', { name, email, password });
+  }
+
+  login(email: string, password: string): Observable<any> {
+    return this.http.post<any>(this.apiUrl + '/login', { email, password }).pipe(tap(res => {
+      if (res.token) {
+        localStorage.setItem('token', res.token);
+        localStorage.setItem('user', JSON.stringify(res.user));
+        this.token.set(res.token);
+        this.currentUser.set(res.user);
+      }
+    }));
+  }
+
+  logout(): void {
+    localStorage.removeItem('token');
+    localStorage.removeItem('user');
+    this.token.set(null);
+    this.currentUser.set(null);
+    this.router.navigate(['/login']);
+  }
+
+  getToken(): string | null { return this.token(); }
+}`
+        },
+        {
+          path: 'src/app/guards/auth.guard.ts',
+          content: `import { inject } from '@angular/core';
+import { Router, CanActivateFn } from '@angular/router';
+import { AuthService } from '../services/auth.service';
+
+export const authGuard: CanActivateFn = () => {
+  const auth = inject(AuthService);
+  return auth.isLoggedIn() ? true : inject(Router).createUrlTree(['/login']);
+};`
+        },
+        {
+          path: 'src/app/interceptors/auth.interceptor.ts',
+          content: `import { HttpInterceptorFn } from '@angular/common/http';
+import { inject } from '@angular/core';
+import { AuthService } from '../services/auth.service';
+
+export const authInterceptor: HttpInterceptorFn = (req, next) => {
+  const token = inject(AuthService).getToken();
+  if (token) {
+    req = req.clone({ setHeaders: { Authorization: 'Bearer ' + token } });
+  }
+  return next(req);
+};`
+        },
+        {
+          path: 'src/app/components/login/login.component.ts',
+          content: `import { Component, inject } from '@angular/core';
+import { CommonModule } from '@angular/common';
+import { FormsModule } from '@angular/forms';
+import { Router, RouterLink } from '@angular/router';
+import { AuthService } from '../../services/auth.service';
+
+@Component({
+  selector: 'app-login',
+  standalone: true,
+  imports: [CommonModule, FormsModule, RouterLink],
+  template: \`
+    <div class="page">
+      <div class="card">
+        <h2>Sign In</h2>
+        <div *ngIf="error" class="alert error">{{ error }}</div>
+        <form (ngSubmit)="login()">
+          <label>Email</label>
+          <input type="email" [(ngModel)]="email" name="email" required />
+          <label>Password</label>
+          <input type="password" [(ngModel)]="password" name="password" required />
+          <button type="submit" [disabled]="loading">{{ loading ? 'Signing in...' : 'Sign In' }}</button>
+        </form>
+        <p class="link">No account? <a routerLink="/register">Register</a></p>
+      </div>
+    </div>
+  \`,
+  styles: [\`
+    .page { display:flex;align-items:center;justify-content:center;min-height:100vh;background:linear-gradient(135deg,#0f0c29,#302b63,#24243e);padding:20px; }
+    .card { background:rgba(255,255,255,0.05);backdrop-filter:blur(20px);border:1px solid rgba(255,255,255,0.1);border-radius:20px;padding:40px;width:400px;max-width:95vw; }
+    h2 { color:#fff;margin:0 0 24px;font-size:22px; }
+    label { display:block;color:rgba(255,255,255,0.6);font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin:12px 0 6px; }
+    input { width:100%;padding:12px 16px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.12);border-radius:10px;color:#fff;font-size:14px;outline:none;box-sizing:border-box; }
+    input:focus { border-color:#818cf8; }
+    button { width:100%;padding:14px;background:linear-gradient(135deg,#6366f1,#8b5cf6);border:none;border-radius:10px;color:#fff;font-size:15px;font-weight:600;cursor:pointer;margin-top:16px; }
+    button:disabled { opacity:0.5; }
+    .alert.error { padding:10px;background:rgba(239,68,68,0.12);color:#f87171;border-radius:8px;margin-bottom:12px; }
+    .link { text-align:center;margin-top:16px;font-size:13px;color:rgba(255,255,255,.4); }
+    .link a { color:#818cf8;text-decoration:none; }
+  \`]
+})
+export class LoginComponent {
+  private auth = inject(AuthService);
+  private router = inject(Router);
+  email = ''; password = ''; loading = false; error = '';
+
+  login() {
+    this.error = '';
+    this.loading = true;
+    this.auth.login(this.email, this.password).subscribe({
+      next: () => this.router.navigate(['/']),
+      error: (err) => { this.error = err.error?.error || 'Login failed'; this.loading = false; },
+      complete: () => this.loading = false,
+    });
+  }
+}`
+        },
+        {
+          path: 'src/app/components/register/register.component.ts',
+          content: `import { Component, inject } from '@angular/core';
+import { CommonModule } from '@angular/common';
+import { FormsModule } from '@angular/forms';
+import { Router, RouterLink } from '@angular/router';
+import { AuthService } from '../../services/auth.service';
+
+@Component({
+  selector: 'app-register',
+  standalone: true,
+  imports: [CommonModule, FormsModule, RouterLink],
+  template: \`
+    <div class="page">
+      <div class="card">
+        <h2>Create Account</h2>
+        <div *ngIf="error" class="alert error">{{ error }}</div>
+        <div *ngIf="success" class="alert success">{{ success }}</div>
+        <form (ngSubmit)="register()">
+          <label>Name</label>
+          <input [(ngModel)]="name" name="name" required />
+          <label>Email</label>
+          <input type="email" [(ngModel)]="email" name="email" required />
+          <label>Password (min 6)</label>
+          <input type="password" [(ngModel)]="password" name="password" required />
+          <button type="submit" [disabled]="loading">{{ loading ? 'Creating...' : 'Create Account' }}</button>
+        </form>
+        <p class="link">Have an account? <a routerLink="/login">Sign In</a></p>
+      </div>
+    </div>
+  \`,
+  styles: [\`
+    .page { display:flex;align-items:center;justify-content:center;min-height:100vh;background:linear-gradient(135deg,#0f0c29,#302b63,#24243e);padding:20px; }
+    .card { background:rgba(255,255,255,0.05);backdrop-filter:blur(20px);border:1px solid rgba(255,255,255,0.1);border-radius:20px;padding:40px;width:400px;max-width:95vw; }
+    h2 { color:#fff;margin:0 0 24px; }
+    label { display:block;color:rgba(255,255,255,0.6);font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin:12px 0 6px; }
+    input { width:100%;padding:12px 16px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.12);border-radius:10px;color:#fff;font-size:14px;outline:none;box-sizing:border-box; }
+    input:focus { border-color:#818cf8; }
+    button { width:100%;padding:14px;background:linear-gradient(135deg,#6366f1,#8b5cf6);border:none;border-radius:10px;color:#fff;font-size:15px;font-weight:600;cursor:pointer;margin-top:16px; }
+    button:disabled { opacity:0.5; }
+    .alert { padding:10px;border-radius:8px;margin-bottom:12px;font-size:13px; }
+    .alert.error { background:rgba(239,68,68,0.12);color:#f87171; }
+    .alert.success { background:rgba(16,185,129,0.12);color:#34d399; }
+    .link { text-align:center;margin-top:16px;font-size:13px;color:rgba(255,255,255,.4); }
+    .link a { color:#818cf8;text-decoration:none; }
+  \`]
+})
+export class RegisterComponent {
+  private auth = inject(AuthService);
+  private router = inject(Router);
+  name = ''; email = ''; password = ''; loading = false; error = ''; success = '';
+
+  register() {
+    this.error = '';
+    if (this.password.length < 6) { this.error = 'Password min 6 chars'; return; }
+    this.loading = true;
+    this.auth.register(this.name, this.email, this.password).subscribe({
+      next: () => { this.success = 'Created! Redirecting...'; setTimeout(() => this.router.navigate(['/login']), 1500); },
+      error: (err) => { this.error = err.error?.error || 'Failed'; this.loading = false; },
+    });
+  }
+}`
+        },
+      ],
+    };
+  }
+
   private addOtpTemplate(): ProjectTemplate {
     return {
       id: 'add-otp',
