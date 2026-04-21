@@ -60,6 +60,9 @@ export class ProjectTemplatesService {
       'chess': () => this.angularChessApp(),
       'angular-snake': () => this.angularSnakeApp(),
       'snake': () => this.angularSnakeApp(),
+      'angular-chatbot': () => this.angularChatbotApp(),
+      'chatbot': () => this.angularChatbotApp(),
+      'chat': () => this.angularChatbotApp(),
     };
     const gen = templates[id.toLowerCase()];
     if (gen) return gen();
@@ -101,6 +104,7 @@ export class ProjectTemplatesService {
     if (/\bquiz\b|\btrivia\b|\bmcq\b/i.test(q)) return 'angular-quiz';
     if (/\bchess\b|\bchessboard\b/i.test(q)) return 'angular-chess';
     if (/\bsnake\s*(game|app)?\b/i.test(q)) return 'angular-snake';
+    if (/\bchat\s?bot\b|\bchatbot\b|\bchat\s*app\b|\b(ai\s+)?assistant\s*(app)?\b|\bchat\s*ui\b/i.test(q)) return 'angular-chatbot';
 
     // Fullstack
     if ((q.includes('angular') && (q.includes('express') || q.includes('backend') || q.includes('node') || q.includes('mongo') || q.includes('fullstack') || q.includes('full stack') || q.includes('full-stack')))) {
@@ -3150,6 +3154,341 @@ bootstrapApplication(AppComponent)
 }`
       },
     ];
+  }
+
+  /**
+   * Angular Chatbot App — fully working chat UI with keyword-based local bot.
+   * Real features: message list, signals-based state, typing indicator, Enter-to-send,
+   * quick replies, localStorage persistence, clear-chat. No backend required.
+   */
+  private angularChatbotApp(): ProjectTemplate {
+    return {
+      id: 'angular-chatbot',
+      name: 'Angular Chatbot App',
+      description: 'Working chat UI with user/bot bubbles, typing indicator, keyword-based local replies, quick-reply chips, and localStorage persistence',
+      files: [
+        ...this.angularShellFiles(''),
+        {
+          path: 'src/app/app.component.ts',
+          content: `import { Component, signal, computed, effect, ElementRef, viewChild, AfterViewInit } from '@angular/core';
+import { CommonModule } from '@angular/common';
+import { FormsModule } from '@angular/forms';
+
+interface ChatMessage {
+  id: number;
+  role: 'user' | 'bot';
+  text: string;
+  timestamp: number;
+}
+
+// Keyword-based rule engine. Each rule returns a bot reply when its pattern hits.
+// Add your own rules here — or swap the whole replyEngine for a real API call.
+interface BotRule {
+  pattern: RegExp;
+  reply: string | ((match: RegExpMatchArray) => string);
+}
+
+const BOT_RULES: BotRule[] = [
+  { pattern: /^(hi|hello|hey|yo|good\s+(morning|evening|afternoon))\\b/i,
+    reply: 'Hi there! I\\'m a local chatbot. Ask me about the weather, the time, or my name.' },
+  { pattern: /\\b(how are you|how\\'s it going|sup)\\b/i,
+    reply: 'Running at 60 frames per second and never sleeping. How about you?' },
+  { pattern: /\\bwhat\\s+(is\\s+)?your\\s+name\\b/i,
+    reply: 'I\\'m ChatBot — your local Angular-powered assistant.' },
+  { pattern: /\\b(who\\s+made|who\\s+built|who\\s+created)\\s+you\\b/i,
+    reply: 'I was scaffolded by an Angular project generator and customized to reply to keywords.' },
+  { pattern: /\\bwhat\\s+time\\b/i,
+    reply: () => 'Right now it\\'s ' + new Date().toLocaleTimeString() + '.' },
+  { pattern: /\\bwhat\\s+(day|date)\\b/i,
+    reply: () => 'Today is ' + new Date().toLocaleDateString(undefined, { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' }) + '.' },
+  { pattern: /\\bweather\\b/i,
+    reply: 'I don\\'t have a weather API hooked up, but if you open the developer console I promise the fan inside your laptop is warm.' },
+  { pattern: /\\b(tell.*joke|make.*laugh)\\b/i,
+    reply: 'Why did the developer go broke? Because he used up all his cache.' },
+  { pattern: /\\b(thank|thanks|ty)\\b/i,
+    reply: 'You\\'re welcome!' },
+  { pattern: /\\b(bye|goodbye|see ya|cya|exit|quit)\\b/i,
+    reply: 'Take care. Refresh the page when you want to chat again.' },
+  { pattern: /\\bhelp\\b/i,
+    reply: 'Try: "hi", "what time is it?", "tell me a joke", "who made you?", or click a suggestion below.' },
+];
+
+const DEFAULT_REPLIES = [
+  'Interesting — tell me more.',
+  'I only speak keyword, so try asking about the time, my name, or say "help".',
+  'Not sure I follow. Try rephrasing, or click one of the suggestions below.',
+];
+
+const QUICK_REPLIES = [
+  'Hello',
+  'What time is it?',
+  'Tell me a joke',
+  'Who made you?',
+  'Help',
+];
+
+const STORAGE_KEY = 'chatbot_history_v1';
+
+@Component({
+  selector: 'app-root',
+  standalone: true,
+  imports: [CommonModule, FormsModule],
+  template: \`
+    <div class="page">
+      <div class="chat-shell">
+        <header class="chat-hdr">
+          <div class="avatar">🤖</div>
+          <div class="hdr-text">
+            <h1>ChatBot</h1>
+            <span class="status">
+              <span class="dot"></span>
+              online
+            </span>
+          </div>
+          <button class="clear-btn" (click)="clearChat()" title="Clear conversation">Clear</button>
+        </header>
+
+        <div class="chat-body" #scrollArea>
+          <div *ngFor="let m of messages(); trackBy: trackMsg"
+               class="msg"
+               [class.user]="m.role === 'user'"
+               [class.bot]="m.role === 'bot'">
+            <div class="bubble">
+              <div class="text">{{ m.text }}</div>
+              <div class="time">{{ formatTime(m.timestamp) }}</div>
+            </div>
+          </div>
+
+          <div class="msg bot" *ngIf="typing()">
+            <div class="bubble typing">
+              <span></span><span></span><span></span>
+            </div>
+          </div>
+        </div>
+
+        <div class="quick-replies" *ngIf="messages().length <= 1">
+          <button *ngFor="let q of quickReplies" (click)="sendQuick(q)">{{ q }}</button>
+        </div>
+
+        <form class="chat-input" (ngSubmit)="send()" #formRef="ngForm">
+          <input
+            type="text"
+            [(ngModel)]="draft"
+            name="draft"
+            placeholder="Type a message..."
+            autocomplete="off"
+            [disabled]="typing()"
+            (keydown.enter)="send(); $event.preventDefault()" />
+          <button type="submit" [disabled]="!draft.trim() || typing()">Send</button>
+        </form>
+      </div>
+    </div>
+  \`,
+  styles: [\`
+    .page { display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 20px; }
+    .chat-shell { width: 100%; max-width: 520px; height: 80vh; min-height: 600px; background: rgba(255,255,255,0.04); backdrop-filter: blur(20px); border: 1px solid rgba(255,255,255,0.1); border-radius: 20px; display: flex; flex-direction: column; overflow: hidden; }
+    .chat-hdr { display: flex; align-items: center; gap: 12px; padding: 16px 20px; border-bottom: 1px solid rgba(255,255,255,0.08); background: rgba(255,255,255,0.02); }
+    .avatar { width: 40px; height: 40px; border-radius: 50%; background: linear-gradient(135deg, #818cf8, #a78bfa); display: flex; align-items: center; justify-content: center; font-size: 20px; }
+    .hdr-text { flex: 1; }
+    .hdr-text h1 { font-size: 16px; margin: 0; color: #fff; font-weight: 600; }
+    .status { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: rgba(255,255,255,0.5); }
+    .dot { width: 7px; height: 7px; border-radius: 50%; background: #34d399; box-shadow: 0 0 8px #34d399; animation: pulse 2s infinite; }
+    @keyframes pulse { 50% { opacity: 0.5; } }
+    .clear-btn { background: transparent; border: 1px solid rgba(255,255,255,0.12); color: rgba(255,255,255,0.6); padding: 5px 12px; border-radius: 6px; cursor: pointer; font-size: 11px; transition: all 0.15s; }
+    .clear-btn:hover { background: rgba(239,68,68,0.15); border-color: #ef4444; color: #fca5a5; }
+
+    .chat-body { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 12px; scroll-behavior: smooth; }
+    .chat-body::-webkit-scrollbar { width: 6px; }
+    .chat-body::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 999px; }
+
+    .msg { display: flex; animation: slide-in 0.2s ease-out; }
+    @keyframes slide-in { from { opacity: 0; transform: translateY(8px); } }
+    .msg.user { justify-content: flex-end; }
+    .msg.bot { justify-content: flex-start; }
+    .bubble { max-width: 75%; padding: 10px 14px; border-radius: 18px; font-size: 14px; line-height: 1.5; position: relative; }
+    .msg.user .bubble { background: linear-gradient(135deg, #6366f1, #818cf8); color: #fff; border-bottom-right-radius: 4px; }
+    .msg.bot .bubble { background: rgba(255,255,255,0.08); color: #e5e7eb; border-bottom-left-radius: 4px; }
+    .text { white-space: pre-wrap; word-break: break-word; }
+    .time { font-size: 10px; color: rgba(255,255,255,0.4); margin-top: 3px; }
+    .msg.user .time { color: rgba(255,255,255,0.7); text-align: right; }
+
+    .bubble.typing { display: inline-flex; gap: 4px; padding: 14px 16px; }
+    .bubble.typing span { width: 7px; height: 7px; border-radius: 50%; background: rgba(255,255,255,0.4); animation: bounce 1.2s infinite; }
+    .bubble.typing span:nth-child(2) { animation-delay: 0.2s; }
+    .bubble.typing span:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes bounce { 0%, 60%, 100% { transform: translateY(0); } 30% { transform: translateY(-5px); } }
+
+    .quick-replies { padding: 12px 20px 0; display: flex; flex-wrap: wrap; gap: 6px; }
+    .quick-replies button { background: rgba(129,140,248,0.1); color: #a5b4fc; border: 1px solid rgba(129,140,248,0.25); padding: 6px 12px; border-radius: 999px; font-size: 12px; cursor: pointer; transition: all 0.15s; }
+    .quick-replies button:hover { background: rgba(129,140,248,0.2); border-color: #818cf8; }
+
+    .chat-input { display: flex; gap: 10px; padding: 16px 20px; border-top: 1px solid rgba(255,255,255,0.08); }
+    .chat-input input { flex: 1; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); border-radius: 10px; padding: 10px 14px; color: #fff; font-size: 14px; outline: none; transition: border-color 0.15s; }
+    .chat-input input:focus { border-color: #818cf8; }
+    .chat-input input:disabled { opacity: 0.5; }
+    .chat-input button { background: linear-gradient(135deg, #6366f1, #818cf8); border: none; color: #fff; padding: 0 18px; border-radius: 10px; font-size: 13px; font-weight: 600; cursor: pointer; transition: transform 0.1s, box-shadow 0.2s; }
+    .chat-input button:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 6px 16px rgba(99,102,241,0.4); }
+    .chat-input button:disabled { opacity: 0.4; cursor: not-allowed; }
+  \`]
+})
+export class AppComponent implements AfterViewInit {
+  readonly messages = signal<ChatMessage[]>([]);
+  readonly typing = signal(false);
+  readonly quickReplies = QUICK_REPLIES;
+
+  draft = '';
+  private nextId = 1;
+  private scrollArea = viewChild<ElementRef<HTMLDivElement>>('scrollArea');
+
+  constructor() {
+    // Load persisted conversation on startup.
+    this.restoreHistory();
+
+    // If nothing was restored, greet the user.
+    if (this.messages().length === 0) {
+      this.addBot('Hi! I\\'m a local chatbot. Ask me anything — or tap a suggestion below.');
+    }
+
+    // Auto-persist whenever the message list changes.
+    effect(() => {
+      const msgs = this.messages();
+      try { localStorage.setItem(STORAGE_KEY, JSON.stringify(msgs)); } catch {}
+    });
+  }
+
+  ngAfterViewInit() { this.scrollToBottom(); }
+
+  trackMsg = (_: number, m: ChatMessage) => m.id;
+  formatTime = (t: number) => new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+  send() {
+    const text = this.draft.trim();
+    if (!text || this.typing()) return;
+    this.draft = '';
+    this.addUser(text);
+    this.respondTo(text);
+  }
+
+  sendQuick(text: string) {
+    if (this.typing()) return;
+    this.addUser(text);
+    this.respondTo(text);
+  }
+
+  clearChat() {
+    this.messages.set([]);
+    this.addBot('Conversation cleared. What would you like to talk about?');
+  }
+
+  // === internals ===
+
+  private addUser(text: string) {
+    this.messages.update(list => [...list, { id: this.nextId++, role: 'user', text, timestamp: Date.now() }]);
+    queueMicrotask(() => this.scrollToBottom());
+  }
+
+  private addBot(text: string) {
+    this.messages.update(list => [...list, { id: this.nextId++, role: 'bot', text, timestamp: Date.now() }]);
+    queueMicrotask(() => this.scrollToBottom());
+  }
+
+  // Compute a reply by matching the first rule whose pattern hits.
+  // Swap this function for a fetch() to a real API when you're ready.
+  private respondTo(userText: string) {
+    const delay = 500 + Math.random() * 700; // simulate "thinking"
+    this.typing.set(true);
+    setTimeout(() => {
+      this.typing.set(false);
+      const reply = this.replyFor(userText);
+      this.addBot(reply);
+    }, delay);
+  }
+
+  private replyFor(userText: string): string {
+    for (const rule of BOT_RULES) {
+      const m = userText.match(rule.pattern);
+      if (m) return typeof rule.reply === 'function' ? rule.reply(m) : rule.reply;
+    }
+    return DEFAULT_REPLIES[Math.floor(Math.random() * DEFAULT_REPLIES.length)];
+  }
+
+  private scrollToBottom() {
+    const el = this.scrollArea()?.nativeElement;
+    if (el) el.scrollTop = el.scrollHeight;
+  }
+
+  private restoreHistory() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as ChatMessage[];
+      if (Array.isArray(parsed) && parsed.length) {
+        this.messages.set(parsed);
+        this.nextId = Math.max(...parsed.map(m => m.id)) + 1;
+      }
+    } catch {}
+  }
+}
+`
+        },
+        {
+          path: 'src/styles.css',
+          content: `*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, 'Inter', sans-serif; background: linear-gradient(135deg, #0f172a, #1e1b4b, #312e81); min-height: 100vh; color: #e5e7eb; }`
+        },
+        {
+          path: 'README.md',
+          content: `# Angular Chatbot App
+
+A working chat UI with signals, keyword-based local bot, typing indicator, and localStorage persistence.
+
+## Run
+
+\\\`\\\`\\\`bash
+npm install
+npm run dev    # or: ng serve
+\\\`\\\`\\\`
+
+Open [http://localhost:4200](http://localhost:4200).
+
+## What's included
+
+- **Message list** with user/bot bubbles, timestamps, smooth slide-in animation
+- **Typing indicator** — 500-1200 ms random delay simulates "thinking"
+- **Keyword rule engine** in \\\`BOT_RULES\\\` (src/app/app.component.ts). Each rule is \\\`{ pattern: RegExp, reply: string | (m) => string }\\\`. Add your own.
+- **Quick reply chips** shown on a fresh conversation
+- **localStorage persistence** — conversations survive page refresh. Clear via the Clear button.
+- **Enter-to-send**, disabled state while bot is "typing", auto-scroll to newest message
+
+## Wire up a real backend
+
+The \\\`respondTo()\\\` method is the hook. Replace the \\\`replyFor()\\\` call with a \\\`fetch()\\\` to your API (OpenAI, Claude, your own Express RAG endpoint, etc.):
+
+\\\`\\\`\\\`typescript
+private async respondTo(userText: string) {
+  this.typing.set(true);
+  try {
+    const res = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: userText }) });
+    const { reply } = await res.json();
+    this.addBot(reply);
+  } catch {
+    this.addBot('Sorry, I had trouble reaching the server.');
+  } finally {
+    this.typing.set(false);
+  }
+}
+\\\`\\\`\\\`
+
+## State model
+
+Everything uses signals — no RxJS needed for a chat this size:
+- \\\`messages: signal<ChatMessage[]>\\\` — the conversation
+- \\\`typing: signal<boolean>\\\` — shows the three-dot indicator and disables input
+- An \\\`effect()\\\` auto-persists every message change to localStorage
+`
+        },
+      ],
+    };
   }
 
   private angularOnly(): ProjectTemplate {

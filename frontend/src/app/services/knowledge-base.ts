@@ -2514,6 +2514,297 @@ describe('AuthService', () => {
   },
 ];
 
+// ===== AI / MACHINE LEARNING =====
+
+const AI_ML: KnowledgeEntry[] = [
+  {
+    topic: 'rag',
+    keywords: ['rag', 'retrieval augmented generation', 'retrieval-augmented generation', 'explain rag', 'what is rag', 'how rag works', 'rag pipeline', 'rag architecture'],
+    title: 'RAG — Retrieval-Augmented Generation',
+    summary: 'RAG is a technique that grounds an AI\'s answer in a retrieved set of relevant documents. Instead of relying only on what the model memorized, the system first searches a knowledge base for passages related to the question, then feeds those passages to the model (or composes the answer directly from them) so the response is accurate, up-to-date, and source-backed.',
+    details: `**RAG = Retrieval + Augmented + Generation.** It solves two big LLM problems at once: outdated training data and hallucinations.
+
+**The pipeline (3 stages):**
+
+1. **Index (offline, one-time)**
+   - Take your corpus (docs, bugs, chat history, code snippets)
+   - Chunk it into passages
+   - Convert each chunk to a vector using an **embedding model** (e.g. MiniLM, OpenAI ada, etc.)
+   - Store the vectors in a database (MongoDB, Pinecone, Weaviate, pgvector)
+
+2. **Retrieve (per query)**
+   - Embed the user's question with the same model
+   - Compute **cosine similarity** against every stored vector
+   - Keep the top-k most similar chunks (k=3-10 typical)
+
+3. **Generate (per query)**
+   - Stuff the retrieved chunks into the LLM's prompt as context
+   - Ask the LLM to answer using *only* that context
+   - Return the answer + optional source citations
+
+**Why RAG over fine-tuning?**
+- Update: add one doc, re-index that doc — no training run
+- Provenance: every answer traces back to specific source chunks
+- Cost: no GPU training; inference is cheap (just similarity search + one LLM call)
+- Privacy: your corpus stays in your DB, never baked into model weights
+
+**Where it fits in this project:**
+This codebase uses RAG in three places:
+- **Knowledge Q&A** — \`routes/knowledge.js\` retrieves from \`KnowledgeEntry\` collection
+- **Defect RAG** — \`services/defectRag.js\` matches runtime errors against \`DefectKnowledge\` curated bug/fix pairs
+- **Chat memory** — \`routes/chat.js /search-vector\` retrieves semantically similar past turns from the user's conversation history, with recency + pin boosts on top of cosine score`,
+    examples: [
+      '```javascript\n// Minimal RAG, MongoDB + MiniLM (this project\'s pattern)\n// 1. Index\nconst { embed } = require(\'./services/embeddings\');\nconst vec = await embed("Angular standalone components");\nawait KnowledgeEntry.create({ topic, text, embedding: vec });\n\n// 2. Retrieve\nconst queryVec = await embed(userQuestion);\nconst entries = await KnowledgeEntry.find({ embedding: { $exists: true } });\nconst scored = entries\n  .map(e => ({ e, score: cosineSim(queryVec, e.embedding) }))\n  .sort((a,b) => b.score - a.score)\n  .slice(0, 3);\n\n// 3. Compose\nconst context = scored.map(s => s.e.text).join(\'\\n---\\n\');\nconst answer = `Based on:\\n${context}\\n\\nAnswer: ...`;\n```',
+      '```javascript\n// Hybrid scoring: cosine + recency + pin boost (what /api/chat/search-vector does)\nconst now = Date.now();\nconst finalScore = cosine\n  + 0.10 * Math.exp(-daysOld / 30)   // recency\n  + (isPinned ? 0.15 : 0);            // pin boost\n```'
+    ],
+    related: ['embeddings', 'vector-search', 'cosine-similarity', 'llm', 'prompt-engineering']
+  },
+  {
+    topic: 'embeddings',
+    keywords: ['embedding', 'embeddings', 'vector embedding', 'text embedding', 'what are embeddings', 'word embeddings', 'sentence embeddings'],
+    title: 'Embeddings — Text as Vectors',
+    summary: 'An embedding is a fixed-length array of numbers that represents the semantic meaning of a piece of text. Texts with similar meaning produce similar vectors, so you can compare meaning with math (cosine similarity) instead of string matching. Embeddings are the foundation of semantic search, RAG, clustering, and recommendation systems.',
+    details: `**What the model actually does:** it reads text, passes it through a transformer, and outputs a vector (typically 384, 768, or 1536 dimensions). Similar inputs land in nearby regions of that high-dimensional space.
+
+**Key properties:**
+- **Fixed length** — "hello" and "War and Peace" both compress to the same vector size
+- **Dense** — every dimension carries meaning; there are no wasted slots
+- **Normalized** (usually) — each vector has length 1 so cosine and dot product are equivalent
+- **Symmetric** — sim(A, B) === sim(B, A)
+
+**Common models:**
+- **MiniLM (sentence-transformers/all-MiniLM-L6-v2)** — 384-dim, ~25MB, fast, runs locally. Used in this project.
+- **text-embedding-3-small** (OpenAI) — 1536-dim, API-based
+- **BGE / E5 / GTE** — strong open-source options, 768-1024 dim
+
+**Why 384 or 768 and not something bigger?** Higher dim ≠ strictly better. It's a tradeoff between expressiveness, storage, and comparison speed. MiniLM-L6 hits a sweet spot for sentence-level semantic tasks.
+
+**"Similar" examples:**
+- "port is in use" ≈ "EADDRINUSE error" — cosine ~0.7
+- "MongoDB connection failed" ≈ "cannot connect to Atlas" — cosine ~0.8
+- "how to bake bread" ≉ "Angular routing" — cosine ~0.1
+
+This is why RAG works: the retrieval step finds passages that *mean* the same thing as the question, even when they share no keywords.`,
+    examples: [
+      '```javascript\n// @xenova/transformers — MiniLM runs locally in Node, no API key\nconst { pipeline } = await import(\'@xenova/transformers\');\nconst pipe = await pipeline(\'feature-extraction\', \'Xenova/all-MiniLM-L6-v2\');\n\nconst out = await pipe("port already in use", { pooling: \'mean\', normalize: true });\nconst vec = Array.from(out.data);   // 384 floats, magnitude = 1\nconsole.log(vec.length);            // 384\n```',
+      '```javascript\n// Comparing two texts\nconst a = await embed("EADDRINUSE: port 4100 in use");\nconst b = await embed("another process is listening on that port");\nconst c = await embed("how do I parse JSON in Python");\n\ncosineSim(a, b);  // ~0.72 — close meaning\ncosineSim(a, c);  // ~0.08 — unrelated\n```'
+    ],
+    related: ['rag', 'cosine-similarity', 'vector-search', 'minilm']
+  },
+  {
+    topic: 'cosine-similarity',
+    keywords: ['cosine similarity', 'cosine sim', 'similarity score', 'vector distance', 'how is cosine calculated', 'cosine formula'],
+    title: 'Cosine Similarity',
+    summary: 'A measure of how similar two vectors are by looking at the angle between them, ignoring magnitude. Result is in [-1, 1]: 1 means identical direction, 0 means perpendicular (unrelated), -1 means opposite. In NLP it\'s the default way to compare embeddings.',
+    details: `**The formula:**
+
+    cos(A, B) = (A · B) / (|A| * |B|)
+
+Where \`A · B\` is the dot product and \`|A|\` is the Euclidean norm (length) of A.
+
+**When vectors are pre-normalized** (length = 1), this simplifies to just the dot product:
+
+    cos(A, B) = A · B        // when |A| = |B| = 1
+
+Embedding libraries like \`@xenova/transformers\` normalize by default, which is why the implementation in \`backend/services/embeddings.js\` is just a dot product loop — no division needed.
+
+**Why angle and not distance?**
+Euclidean distance cares about magnitude; cosine doesn't. For text, length of the vector is more about total "energy" than meaning, so you want to ignore it. Two documents about the same topic but with very different lengths should still match.
+
+**Interpretation ranges (for sentence embeddings):**
+- > 0.8 — near-duplicate
+- 0.5 - 0.8 — clearly related
+- 0.3 - 0.5 — loosely related
+- < 0.3 — probably unrelated
+
+**Picking a cutoff:**
+Most RAG systems filter with minScore ~ 0.3-0.4. Below that, you get noise; above it, you sometimes miss valid matches. Tune per domain.`,
+    examples: [
+      '```javascript\n// Minimal implementation (assumes inputs already normalized)\nfunction cosineSim(a, b) {\n  if (!a || !b || a.length !== b.length) return 0;\n  let dot = 0;\n  for (let i = 0; i < a.length; i++) dot += a[i] * b[i];\n  return dot;\n}\n```',
+      '```javascript\n// Full version, no normalization assumption\nfunction cosineSim(a, b) {\n  let dot = 0, na = 0, nb = 0;\n  for (let i = 0; i < a.length; i++) {\n    dot += a[i] * b[i];\n    na += a[i] * a[i];\n    nb += b[i] * b[i];\n  }\n  return dot / (Math.sqrt(na) * Math.sqrt(nb));\n}\n```'
+    ],
+    related: ['embeddings', 'rag', 'vector-search']
+  },
+  {
+    topic: 'vector-search',
+    keywords: ['vector search', 'semantic search', 'vector database', 'knn search', 'nearest neighbor', 'approximate nearest neighbor', 'ann'],
+    title: 'Vector Search',
+    summary: 'Finding the k most similar items to a query by comparing embeddings. Unlike keyword search (matches exact tokens), vector search matches meaning — "crashed when starting" finds "EADDRINUSE on boot" even though they share zero words.',
+    details: `**The problem:** given a query vector, find the k most similar vectors in a corpus of N items.
+
+**Brute force (what this project uses):**
+Load every vector, compute cosine with the query, sort, take top-k. O(N * d) per query where d is vector dim. Works great until N gets into the 100k+ range.
+
+**Approximate Nearest Neighbor (ANN) — for scale:**
+- **HNSW** (Hierarchical Navigable Small World) — graph-based, very fast, built into pgvector, Weaviate, Qdrant, Milvus
+- **IVF** (Inverted File Index) — clusters vectors, only searches nearby clusters
+- **LSH** (Locality-Sensitive Hashing) — hash buckets where similar vectors collide
+
+Trade: a tiny bit of recall (maybe 95% correct top-k) for massive speedup (O(log N) instead of O(N)).
+
+**Vector databases you'll encounter:**
+- **pgvector** — Postgres extension, easiest to deploy if you already have Postgres
+- **Pinecone** — SaaS, zero-ops, pay per million vectors
+- **Weaviate / Qdrant / Milvus** — self-hostable, full-featured
+- **MongoDB Atlas Vector Search** — native $vectorSearch aggregation stage
+- **"just store floats in MongoDB"** — what this project does. Fine up to tens of thousands of vectors.
+
+**Hybrid search (keyword + vector):**
+Many production systems combine BM25 (classic keyword) with cosine and blend scores. Vector alone can miss exact-term matches; keyword alone can miss paraphrases.`,
+    examples: [
+      '```javascript\n// Brute-force top-k used throughout this project (defectRag.js, chat search-vector)\nasync function topK(queryText, k = 3) {\n  const queryVec = await embed(queryText);\n  const docs = await Collection.find({ embedding: { $exists: true } });\n  return docs\n    .map(d => ({ doc: d, score: cosineSim(queryVec, d.embedding) }))\n    .sort((a, b) => b.score - a.score)\n    .slice(0, k);\n}\n```',
+      '```javascript\n// MongoDB Atlas Vector Search (if you enable the feature)\nconst pipeline = [{\n  $vectorSearch: {\n    index: "embedding_index",\n    path: "embedding",\n    queryVector: queryVec,\n    numCandidates: 100,\n    limit: 3,\n  }\n}];\nconst results = await Collection.aggregate(pipeline);\n```'
+    ],
+    related: ['rag', 'embeddings', 'cosine-similarity']
+  },
+  {
+    topic: 'llm',
+    keywords: ['llm', 'large language model', 'what is an llm', 'language models', 'gpt', 'transformer', 'chat models'],
+    title: 'LLM — Large Language Model',
+    summary: 'An LLM is a neural network (typically a decoder-only transformer) trained on massive text corpora to predict the next token. Given enough parameters (billions) and data, this simple objective produces models that can chat, translate, summarize, write code, and reason. They don\'t "know" things — they produce statistically likely continuations of their input.',
+    details: `**The core idea:** next-token prediction, at scale.
+
+**Architecture:** transformer, usually decoder-only (GPT-style). Each layer attends to all previous tokens. Most modern LLMs have 20-100+ layers and billions of parameters.
+
+**Training stages:**
+1. **Pretraining** — predict next token on trillions of tokens (books, web, code). Expensive (millions of dollars).
+2. **Instruction tuning** — fine-tune on (prompt, good-response) pairs so the model follows requests.
+3. **RLHF / DPO** — further align with human preferences via feedback.
+
+**Important limits:**
+- **Context window** — how many tokens the model can see at once (2k-200k+). RAG exists partly to work around this.
+- **Hallucination** — it will confidently make things up if asked about something outside its training. RAG + citations mitigate this.
+- **Knowledge cutoff** — no information after the training date. Another reason for RAG.
+- **Deterministic-ish** — same input + temperature=0 usually gives same output, but not guaranteed across API versions.
+
+**Leveraging LLMs without training your own:**
+- **Prompting** — just write better inputs
+- **RAG** — inject relevant context before asking
+- **Tool use / function calling** — let the model call APIs or code
+- **Fine-tuning** — small adjustments on domain data (only when prompting + RAG aren't enough)
+
+**Local / open-weight models worth knowing:**
+Llama 3, Mistral, Qwen, DeepSeek, Gemma — all runnable locally with llama.cpp / Ollama / vLLM.`,
+    examples: [
+      '```python\n# Ollama: local LLM in 3 lines\nimport ollama\nresponse = ollama.chat(model=\'llama3\', messages=[\n  {"role": "user", "content": "Explain RAG"}\n])\nprint(response[\'message\'][\'content\'])\n```',
+      '```javascript\n// Cloud LLM — using Anthropic SDK as an example\nimport Anthropic from "@anthropic-ai/sdk";\nconst client = new Anthropic();\nconst msg = await client.messages.create({\n  model: "claude-sonnet-4-6",\n  max_tokens: 1024,\n  messages: [{ role: "user", content: "Write a haiku about RAG" }],\n});\n```'
+    ],
+    related: ['rag', 'prompt-engineering', 'embeddings', 'ai-agents']
+  },
+  {
+    topic: 'prompt-engineering',
+    keywords: ['prompt', 'prompt engineering', 'prompting', 'system prompt', 'few shot', 'chain of thought', 'cot', 'how to write prompts'],
+    title: 'Prompt Engineering',
+    summary: 'The practice of designing the input to an LLM so it produces the output you want. Most "can\'t the AI do X?" problems are actually prompt problems. Good prompts are specific, give examples, define format, and constrain scope.',
+    details: `**The anatomy of a solid prompt:**
+
+1. **Role / system message** — "You are a senior Node.js engineer..."
+2. **Task** — single, concrete verb: classify, summarize, rewrite, extract
+3. **Input** — the data to act on, clearly delimited
+4. **Examples** (few-shot) — 2-3 input/output pairs if the task is non-obvious
+5. **Format spec** — "Respond in JSON with keys: title, severity, fix."
+6. **Constraints** — "Under 200 words. No markdown headers."
+
+**Techniques that actually help:**
+- **Few-shot prompting** — show the pattern, don't describe it. Often the biggest single improvement.
+- **Chain-of-thought (CoT)** — "Think step by step before answering." Worse for latency, better for reasoning.
+- **Self-consistency** — sample multiple times, take majority answer. Costly but reliable.
+- **Role / persona** — "act as a copy editor" anchors the response style.
+- **Negative constraints** — "Do NOT include X." Sometimes more effective than positive framing.
+- **Structured output** — ask for JSON with a schema, or XML tags (<answer>, <reasoning>) for easy parsing.
+
+**Anti-patterns:**
+- **Vague requests** — "make it better" → ask "shorten to 3 sentences and remove passive voice"
+- **Conflicting instructions** — "be thorough but also very brief"
+- **Hiding the ask at the end of a wall of text** — models weight recent tokens heavily; put the key instruction last (or repeat it)
+
+**For RAG specifically:**
+System prompt should say: "Answer using ONLY the provided context. If the context doesn't contain the answer, say 'I don't know.' Cite sources as [1], [2]." This dramatically reduces hallucination.`,
+    examples: [
+      '```text\nBAD:\n"summarize this"\n\nGOOD:\n"Summarize the following bug report in 2 sentences for a non-technical PM.\nInclude: (1) what broke, (2) user impact. Do not mention stack traces.\n\nBUG REPORT:\n<<<\n{report}\n>>>"\n```',
+      '```text\n# RAG system prompt template\nYou are a defect analyst. Answer the user\'s question using ONLY the\nKNOWLEDGE BASE passages below. If the answer is not there, say:\n"No matching entry in the knowledge base."\n\nCite the source of each claim as [#passage-index]. Be concise.\n\nKNOWLEDGE BASE:\n[1] {passage_1}\n[2] {passage_2}\n[3] {passage_3}\n\nQUESTION: {user_question}\n```'
+    ],
+    related: ['llm', 'rag', 'ai-agents']
+  },
+  {
+    topic: 'ai-agents',
+    keywords: ['ai agent', 'agents', 'agent loop', 'tool use', 'function calling', 'react pattern', 'autonomous agent'],
+    title: 'AI Agents',
+    summary: 'An "agent" is an LLM running in a loop that can call tools (functions/APIs) and observe results, then decide what to do next. The loop typically runs: model proposes action → system executes → result fed back → repeat until done. Agents turn an LLM from "text generator" into "autonomous worker."',
+    details: `**The basic loop (ReAct pattern):**
+
+    while not done:
+        thought = llm("what should I do next given <history>?")
+        action = parse_tool_call(thought)
+        observation = execute(action)
+        history.append((thought, action, observation))
+
+**Key ingredients:**
+- **Tool definitions** — JSON schemas describing what the agent can do (read_file, search_web, run_sql, etc.)
+- **Function/tool calling** — modern LLM APIs return structured tool calls instead of free text when they want to act
+- **Observation feeding** — result of each tool call goes back into the conversation so the model sees what happened
+- **Termination condition** — "final_answer" tool, or step budget, or heuristic
+
+**Popular frameworks:**
+- **LangChain / LangGraph** — Python/JS, most ecosystem
+- **CrewAI, AutoGen** — multi-agent orchestration
+- **Anthropic Agent SDK** — Claude-native, first-class tool use
+- **OpenAI Assistants API** — hosted agent runtime
+
+**Failure modes:**
+- **Looping** — agent repeats the same action. Fix: deduplicate recent tool calls.
+- **Over-calling tools** — agent searches the web for "2+2". Fix: nudge in the system prompt to try direct answer first.
+- **Tool mismatch** — model picks wrong tool. Fix: clearer tool descriptions and examples.
+- **Context blowup** — conversation grows unbounded. Fix: summarize old turns periodically.
+
+**When NOT to use an agent:**
+If the task is a fixed pipeline ("extract → translate → save"), write a plain script. Agents shine when the path isn't known upfront.`,
+    examples: [
+      '```javascript\n// Minimal tool-use loop (Anthropic SDK style)\nimport Anthropic from "@anthropic-ai/sdk";\nconst client = new Anthropic();\n\nconst tools = [{\n  name: "read_file",\n  description: "Read a file from disk",\n  input_schema: { type: "object", properties: { path: { type: "string" }}, required: ["path"] },\n}];\n\nlet messages = [{ role: "user", content: "Summarize README.md" }];\nwhile (true) {\n  const res = await client.messages.create({ model: "claude-sonnet-4-6", max_tokens: 1024, tools, messages });\n  messages.push({ role: "assistant", content: res.content });\n  const toolCall = res.content.find(c => c.type === "tool_use");\n  if (!toolCall) break;   // final answer reached\n  const result = await runTool(toolCall.name, toolCall.input);\n  messages.push({ role: "user", content: [{ type: "tool_result", tool_use_id: toolCall.id, content: result }] });\n}\n```'
+    ],
+    related: ['llm', 'prompt-engineering', 'rag']
+  },
+  {
+    topic: 'fine-tuning-vs-rag',
+    keywords: ['fine tuning', 'fine-tuning', 'finetuning', 'fine tune vs rag', 'rag vs fine tuning', 'when to fine tune', 'should i fine tune'],
+    title: 'Fine-tuning vs. RAG',
+    summary: 'Fine-tuning adjusts the model\'s weights on your data. RAG leaves the model alone and retrieves your data per query. For factual knowledge injection, RAG wins on cost, freshness, and provenance. For style, tone, or a very specific output format that RAG can\'t teach by showing, fine-tuning helps.',
+    details: `**TL;DR — default to RAG. Fine-tune only when you\'ve proven RAG isn\'t enough.**
+
+**Use RAG when:**
+- You need the model to answer from a corpus (docs, KB, chat history, tickets)
+- Your data updates often — new docs should be answerable immediately
+- You need citations / traceability
+- You\'re cost-sensitive (fine-tuning is expensive; inference with retrieval is cheap)
+- Your corpus is private and mustn\'t be baked into weights that could be extracted
+
+**Use fine-tuning when:**
+- You want the model to consistently produce a specific **format** (e.g. always valid JSON of a complex schema)
+- You\'re trying to change **style / voice** across every response
+- You have a narrow, stable task where prompting + RAG can\'t achieve the quality bar
+- You\'re training domain-specific adapters (LoRA) that are small to store and swap
+
+**Hybrid is common:**
+A lightly fine-tuned model for format/style + RAG for facts. Best of both.
+
+**Practical matrix:**
+
+    Problem                    | RAG | Fine-tune
+    ---------------------------|-----|----------
+    "Learn our product docs"   |  X  |
+    "Always return JSON"       |     |    X
+    "Match our brand voice"    |     |    X
+    "Answer from ticket logs"  |  X  |
+    "Cite sources"             |  X  |
+    "Do it cheap"              |  X  |
+    "Fresh data daily"         |  X  |`,
+    examples: [
+      '```text\nBefore fine-tuning, try:\n1. Better prompt (especially format + examples)\n2. Better retrieval (more chunks, better chunking, hybrid search)\n3. A stronger base model\n4. Few-shot prompting (paste 3-5 examples inline)\n\nOnly if all four hit a ceiling should you reach for fine-tuning.\n```'
+    ],
+    related: ['rag', 'llm', 'prompt-engineering']
+  },
+];
+
 // ===== COMPILE ALL CATEGORIES =====
 
 export const KNOWLEDGE_BASE: KnowledgeCategory[] = [
@@ -2531,6 +2822,7 @@ export const KNOWLEDGE_BASE: KnowledgeCategory[] = [
   { name: 'Security', entries: SECURITY },
   { name: 'Real-World Backend', entries: REAL_WORLD_BACKEND },
   { name: 'QA & Testing', entries: QA_TESTING },
+  { name: 'AI & Machine Learning', entries: AI_ML },
 ];
 
 // Flat list for quick search
@@ -2624,6 +2916,32 @@ const DIRECT_ANSWERS: DirectAnswer[] = [
     patterns: [/mongodb.*connect.*fail/, /mongoose.*connect.*error/, /srv.*refused/, /mongo.*dns/],
     answer: `**Fix MongoDB Connection Error:**\n\n\`\`\`javascript\nconst dns = require('dns');\ndns.setServers(['8.8.8.8', '8.8.4.4']); // Fix DNS resolution\n\nmongoose.connect(uri, {\n  family: 4,                    // Force IPv4\n  serverSelectionTimeoutMS: 15000,\n});\n\`\`\`\n\n**Common fixes:**\n1. **DNS SRV error** — Add \`dns.setServers(['8.8.8.8'])\` before connecting\n2. **Network access** — Whitelist your IP in MongoDB Atlas (Network Access > Add IP)\n3. **Wrong password** — Check the connection string password is URL-encoded\n4. **Firewall** — Some networks block MongoDB ports. Try a different network.`,
     topic: 'common-bugs'
+  },
+  // ===== AI / RAG quick answers =====
+  {
+    patterns: [/^(what\s+is|explain|define|describe)\s+rag\b/i, /^rag\??$/i, /how\s+(does|do)\s+rag\s+work/i],
+    answer: `**RAG — Retrieval-Augmented Generation**\n\nInstead of asking an LLM to answer from memory, RAG first *retrieves* relevant passages from your own knowledge base, then passes them to the model as context.\n\n**The 3-stage pipeline:**\n1. **Index** — chunk your corpus, embed each chunk, store vectors in a DB (one-time).\n2. **Retrieve** — embed the query, cosine-similarity against stored vectors, take top-k.\n3. **Generate** — feed retrieved chunks + question to an LLM, or compose directly.\n\n**Why it beats fine-tuning for factual knowledge:**\n- Fresh: add a doc, re-index that doc — no training run\n- Cheap: no GPU, just embedding + similarity search\n- Traceable: every answer cites specific source chunks\n- Private: data stays in your DB\n\n**This project uses RAG three ways:**\n- \`routes/knowledge.js\` → Q&A over curated KB\n- \`services/defectRag.js\` → match runtime errors to fix patterns\n- \`routes/chat.js /search-vector\` → semantic memory over past chats (with recency + pin boosts)\n\nAsk "what are embeddings?" or "how does cosine similarity work?" for the pieces.`,
+    topic: 'rag'
+  },
+  {
+    patterns: [/^(what\s+(is|are)|explain|define)\s+embedding/i, /^embedding(s)?\??$/i, /what\s+does.*embed.*do/i],
+    answer: `**Embedding — text as a vector**\n\nAn embedding is a fixed-length array of numbers (typically 384, 768, or 1536 dims) that captures the semantic meaning of a piece of text. Similar meaning → similar vector.\n\n**Key properties:**\n- Fixed length regardless of input size\n- Similar texts have high cosine similarity\n- Produced by a transformer (MiniLM, BGE, OpenAI ada, etc.)\n\nThis project uses **MiniLM-L6-v2** via \`@xenova/transformers\` — 384 dimensions, ~25 MB cached under \`backend/.models-cache/\`, runs fully offline.\n\n\`\`\`javascript\nconst { embed } = require('./services/embeddings');\nconst vec = await embed("port already in use"); // → Float32Array(384)\n\`\`\`\n\nAsk "what is RAG?" to see how embeddings power retrieval.`,
+    topic: 'embeddings'
+  },
+  {
+    patterns: [/^(what\s+is|explain)\s+cosine\s+sim/i, /cosine\s+similarity/i, /how.*similarity.*calculated/i],
+    answer: `**Cosine similarity** — how similar two vectors are, by the angle between them.\n\n\`\`\`\ncos(A, B) = (A · B) / (|A| · |B|)\n\`\`\`\n\nRange [-1, 1]:\n- **1** — identical direction (same meaning)\n- **0** — perpendicular (unrelated)\n- **-1** — opposite\n\nFor normalized vectors (|A|=|B|=1, which MiniLM outputs), it's just the dot product:\n\n\`\`\`javascript\nfunction cosineSim(a, b) {\n  let dot = 0;\n  for (let i = 0; i < a.length; i++) dot += a[i] * b[i];\n  return dot;\n}\n\`\`\`\n\n**Typical cutoffs:** \`>0.8\` = near-duplicate, \`0.5-0.8\` = clearly related, \`<0.3\` = noise. RAG systems usually filter at \`minScore ~0.3-0.4\`.`,
+    topic: 'cosine-similarity'
+  },
+  {
+    patterns: [/^(what\s+is|explain)\s+(an?\s+)?llm/i, /large\s+language\s+model/i],
+    answer: `**LLM — Large Language Model**\n\nA neural network (decoder-only transformer) trained to predict the next token. At billions of parameters + trillions of tokens, this simple objective produces models that can chat, code, translate, and reason.\n\n**Key limits to remember:**\n- **Context window** — tokens the model can see at once. RAG exists partly to work around this.\n- **Hallucination** — confidently fabricates when uncertain. Mitigate with RAG + "answer only from context."\n- **Knowledge cutoff** — no info after training date.\n\n**You rarely need to train one** — combinations of prompting, RAG, and tool use get you most of the way without touching model weights.`,
+    topic: 'llm'
+  },
+  {
+    patterns: [/fine.?tun.*vs.*rag/i, /rag.*vs.*fine.?tun/i, /should\s+i\s+fine.?tune/i, /when.*fine.?tune/i],
+    answer: `**Fine-tuning vs RAG — default to RAG.**\n\n| Need | Pick |\n|------|------|\n| Answer from your docs / KB / tickets | **RAG** |\n| Always return JSON of a specific schema | Fine-tune |\n| Match brand voice / tone consistently | Fine-tune |\n| Data updates often | **RAG** |\n| Need citations / provenance | **RAG** |\n| Cost-sensitive | **RAG** |\n\n**Before fine-tuning, try:**\n1. Better prompt (examples + format spec)\n2. Better retrieval (more chunks, hybrid search)\n3. A stronger base model\n4. Few-shot prompting\n\nOnly if all four plateau is fine-tuning worth the cost.`,
+    topic: 'fine-tuning-vs-rag'
   },
 ];
 
@@ -2849,12 +3167,15 @@ function formatFocusedAnswer(entry: KnowledgeEntry, query: string): string {
 export function answerQuestion(query: string): string {
   const q = query.toLowerCase().trim();
 
-  // 1. Greetings
+  // 1. Greetings — short, natural, no intro dump. Rotate a few openers so it doesn't feel robotic.
   if (/^(hi|hello|hey|good morning|good evening|sup|yo)\b/.test(q)) {
-    const topicList = KNOWLEDGE_BASE.map(c =>
-      `- **${c.name}** — ${c.entries.map(e => e.title).slice(0, 3).join(', ')}`
-    ).join('\n');
-    return `Hello! I'm your offline AI assistant. No API key needed.\n\nI can answer questions about:\n${topicList}\n\nTry asking:\n- "What is JavaScript?"\n- "How to check Angular version"\n- "Explain async/await"\n- "TypeScript vs JavaScript"`;
+    const greetings = [
+      'Hi! What can I help you with?',
+      'Hey — what do you want to work on?',
+      'Hello! Ask me anything, or open a folder to start coding.',
+      "Hi there. What's up?",
+    ];
+    return greetings[Math.floor(Math.random() * greetings.length)];
   }
 
   // 2. Direct answers (exact pattern matches for specific how-to questions)

@@ -356,6 +356,168 @@ console.log(countVowels('Angular'));       // 3`,
     },
 
     {
+      name: 'even-numbers',
+      aliases: ['even', 'even number', 'even numbers', 'even no', 'even nos', 'print even', 'check even', 'is even', 'even or odd'],
+      description: 'Print / check even numbers',
+      complexity: 'O(n) for print, O(1) for check',
+      code: `// Check if a number is even
+function isEven(n) {
+  return n % 2 === 0;
+}
+
+// Print all even numbers from 1 to n
+function printEvenNumbers(n) {
+  for (let i = 2; i <= n; i += 2) {
+    console.log(i);
+  }
+}
+
+// Get even numbers from an array
+function filterEven(arr) {
+  return arr.filter(n => n % 2 === 0);
+}
+
+// Sum of even numbers up to n
+function sumOfEven(n) {
+  let sum = 0;
+  for (let i = 2; i <= n; i += 2) sum += i;
+  return sum;
+}`,
+      example: `console.log(isEven(4));              // true
+console.log(isEven(7));              // false
+printEvenNumbers(10);                // 2, 4, 6, 8, 10
+console.log(filterEven([1,2,3,4,5,6])); // [2, 4, 6]
+console.log(sumOfEven(10));          // 30`,
+    },
+
+    {
+      name: 'odd-numbers',
+      aliases: ['odd', 'odd number', 'odd numbers', 'odd no', 'odd nos', 'print odd', 'check odd', 'is odd'],
+      description: 'Print / check odd numbers',
+      complexity: 'O(n) for print, O(1) for check',
+      code: `function isOdd(n) {
+  return n % 2 !== 0;
+}
+
+function printOddNumbers(n) {
+  for (let i = 1; i <= n; i += 2) {
+    console.log(i);
+  }
+}
+
+function filterOdd(arr) {
+  return arr.filter(n => n % 2 !== 0);
+}`,
+      example: `console.log(isOdd(7));               // true
+printOddNumbers(10);                 // 1, 3, 5, 7, 9
+console.log(filterOdd([1,2,3,4,5])); // [1, 3, 5]`,
+    },
+
+    {
+      name: 'leap-year',
+      aliases: ['leap year', 'leap', 'is leap year', 'check leap year', 'leapyear'],
+      description: 'Check if a year is a leap year',
+      complexity: 'O(1)',
+      code: `function isLeapYear(year) {
+  // Divisible by 4, but not 100, unless also by 400
+  return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+}`,
+      example: `console.log(isLeapYear(2000)); // true
+console.log(isLeapYear(2100)); // false
+console.log(isLeapYear(2024)); // true`,
+    },
+
+    {
+      name: 'sum-of-digits',
+      aliases: ['sum of digits', 'digit sum', 'sum digits', 'add digits'],
+      description: 'Sum of the digits of a number',
+      complexity: 'O(log n)',
+      code: `function sumOfDigits(n) {
+  n = Math.abs(n);
+  let sum = 0;
+  while (n > 0) {
+    sum += n % 10;
+    n = Math.floor(n / 10);
+  }
+  return sum;
+}`,
+      example: `console.log(sumOfDigits(1234)); // 10
+console.log(sumOfDigits(999));  // 27`,
+    },
+
+    {
+      name: 'count-digits',
+      aliases: ['count digits', 'number of digits', 'digit count', 'how many digits'],
+      description: 'Count digits of a number',
+      complexity: 'O(log n)',
+      code: `function countDigits(n) {
+  n = Math.abs(n);
+  if (n === 0) return 1;
+  return Math.floor(Math.log10(n)) + 1;
+}`,
+      example: `console.log(countDigits(12345)); // 5
+console.log(countDigits(0));     // 1`,
+    },
+
+    {
+      name: 'multiplication-table',
+      aliases: ['multiplication table', 'times table', 'table of', 'print table'],
+      description: 'Print the multiplication table of a number',
+      complexity: 'O(n)',
+      code: `function multiplicationTable(n, upTo = 10) {
+  for (let i = 1; i <= upTo; i++) {
+    console.log(\`\${n} x \${i} = \${n * i}\`);
+  }
+}`,
+      example: `multiplicationTable(5);
+// 5 x 1 = 5
+// 5 x 2 = 10
+// ...
+// 5 x 10 = 50`,
+    },
+
+    {
+      name: 'array-sum',
+      aliases: ['sum of array', 'array sum', 'add array', 'sum numbers', 'sum of numbers', 'total of array'],
+      description: 'Sum all numbers in an array',
+      complexity: 'O(n)',
+      code: `function arraySum(arr) {
+  return arr.reduce((a, b) => a + b, 0);
+}
+
+// Manual loop version
+function arraySumLoop(arr) {
+  let sum = 0;
+  for (const n of arr) sum += n;
+  return sum;
+}`,
+      example: `console.log(arraySum([1, 2, 3, 4, 5])); // 15`,
+    },
+
+    {
+      name: 'array-max-min',
+      aliases: ['max of array', 'min of array', 'largest number', 'smallest number', 'max min', 'find max', 'find min'],
+      description: 'Find the max / min element in an array',
+      complexity: 'O(n)',
+      code: `function arrayMax(arr) {
+  return Math.max(...arr);
+}
+
+function arrayMin(arr) {
+  return Math.min(...arr);
+}
+
+// Manual version for huge arrays (avoids spread stack limit)
+function arrayMaxLoop(arr) {
+  let max = -Infinity;
+  for (const n of arr) if (n > max) max = n;
+  return max;
+}`,
+      example: `console.log(arrayMax([3, 1, 7, 2])); // 7
+console.log(arrayMin([3, 1, 7, 2])); // 1`,
+    },
+
+    {
       name: 'anagram-check',
       aliases: ['anagram', 'is anagram', 'anagrams'],
       description: 'Check if two strings are anagrams',

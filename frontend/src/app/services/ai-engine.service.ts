@@ -8,6 +8,7 @@ import { KnowledgeApiService } from './knowledge-api.service';
 import { AlgorithmsService } from './algorithms.service';
 import { EnhancementsService } from './enhancements.service';
 import { LeetcodeService, LeetProblem } from './leetcode.service';
+import { ChatHistoryService, Conversation } from './chat-history.service';
 
 // ===== TYPES =====
 
@@ -92,9 +93,84 @@ export class AIEngineService {
   private algos = inject(AlgorithmsService);
   private enhancements = inject(EnhancementsService);
   private leetcode = inject(LeetcodeService);
+  private history = inject(ChatHistoryService);
+  readonly conversations = signal<Conversation[]>([]);
+  readonly activeConversationId = signal<string | null>(null);
+  readonly hasMoreHistory = signal(false);
+  private conversationsLoaded = false;
   private aiSessionId: string | null = null;
   private idCounter = 0;
   private id(): string { return 'ai_' + (++this.idCounter); }
+
+  /**
+   * Fetch the user's conversations list. If none exist, starts fresh (no active conversation).
+   * If one or more exist, loads the most-recent into the view.
+   */
+  async loadPersistedHistory(): Promise<void> {
+    if (this.conversationsLoaded) return;
+    this.conversationsLoaded = true;
+    const convos = await this.history.listConversations();
+    this.conversations.set(convos);
+    if (convos.length > 0) {
+      await this.switchConversation(convos[0]._id);
+    } else {
+      this.messages.set([]);
+      this.activeConversationId.set(null);
+    }
+  }
+
+  /** Load a specific conversation's messages into the view (most recent 30 by default). */
+  async switchConversation(conversationId: string, limit = 30): Promise<void> {
+    const data = await this.history.loadConversation(conversationId, limit);
+    if (!data) return;
+    const restored: ChatMessage[] = data.messages.map(p => ({
+      id: this.id(),
+      role: p.role,
+      text: p.text,
+      timestamp: p.createdAt ? new Date(p.createdAt) : new Date(),
+      artifacts: p.artifacts || [],
+      steps: p.steps || [],
+      thinking: p.thinking,
+    }));
+    this.messages.set(restored);
+    this.activeConversationId.set(conversationId);
+    this.hasMoreHistory.set(!!data.hasMore);
+  }
+
+  /** Load the full conversation history (all messages) — wipes the capped view. */
+  async loadFullHistory(): Promise<void> {
+    const id = this.activeConversationId();
+    if (!id) return;
+    await this.switchConversation(id, 0);
+  }
+
+  /** Start a fresh conversation; view is cleared. The new conversation gets created on the first message save. */
+  startNewConversation(): void {
+    this.messages.set([]);
+    this.activeConversationId.set(null);
+  }
+
+  /** Refresh the sidebar conversation list (e.g. after a new title). */
+  async refreshConversations(): Promise<void> {
+    const convos = await this.history.listConversations();
+    this.conversations.set(convos);
+  }
+
+  async deleteConversation(id: string): Promise<void> {
+    await this.history.deleteConversation(id);
+    this.conversations.update(cs => cs.filter(c => c._id !== id));
+    if (this.activeConversationId() === id) {
+      this.startNewConversation();
+    }
+  }
+
+  /** Clears both in-memory messages for the current thread and EVERY persisted conversation. */
+  async clearHistory(): Promise<void> {
+    await this.history.clearAllHistory();
+    this.messages.set([]);
+    this.conversations.set([]);
+    this.activeConversationId.set(null);
+  }
 
   projectBasePath = '';
 
@@ -135,7 +211,22 @@ export class AIEngineService {
   async sendMessage(input: string, report: ProjectReport, currentFile?: ProjectFile): Promise<void> {
     if (!input.trim()) return;
 
-    this.messages.update(m => [...m, { id: this.id(), role: 'user', text: input, timestamp: new Date() }]);
+    const userMsg: ChatMessage = { id: this.id(), role: 'user', text: input, timestamp: new Date() };
+    this.messages.update(m => [...m, userMsg]);
+    // Persist the user message. If no active conversation, the backend creates one and returns its id.
+    this.history.saveMessage({
+      role: 'user',
+      text: input,
+      conversationId: this.activeConversationId() || undefined,
+    }).then(saved => {
+      if (saved && !this.activeConversationId()) {
+        this.activeConversationId.set(saved.conversationId);
+        this.refreshConversations();
+      } else if (saved) {
+        // Bump the conversation's lastMessageAt position in the sidebar.
+        this.refreshConversations();
+      }
+    }).catch(() => {});
     this.analyzing.set(true);
 
     // Analyze project if not done
@@ -158,9 +249,25 @@ export class AIEngineService {
       await this.streamText(response.text, msgId);
 
       // Add final message with artifacts
-      this.messages.update(m => [...m, { ...response, id: msgId }]);
+      const finalMsg = { ...response, id: msgId };
+      this.messages.update(m => [...m, finalMsg]);
       this.streamingId.set('');
       this.streamingText.set('');
+
+      // Persist AI response under the same (now-existing) conversation.
+      this.history.saveMessage({
+        role: 'ai',
+        text: finalMsg.text,
+        artifacts: finalMsg.artifacts,
+        steps: finalMsg.steps,
+        thinking: finalMsg.thinking,
+        conversationId: this.activeConversationId() || undefined,
+      }).then(saved => {
+        if (saved && !this.activeConversationId()) {
+          this.activeConversationId.set(saved.conversationId);
+        }
+        this.refreshConversations();
+      }).catch(() => {});
     } finally {
       this.analyzing.set(false);
     }
@@ -253,17 +360,26 @@ export class AIEngineService {
     const computeResult = this.tryCompute(input);
     if (computeResult) return computeResult;
 
+    // Knowledge questions must NOT be hijacked by the algorithm router —
+    // "what is vector search" is a KB lookup, not a request for binary-search code.
+    // Detect these and skip the algo branches below.
+    const isKnowledgeQuestion = /^(what|what's|whats|how|why|when|where|who|explain|describe|define|tell me about|do you know)\b/i.test(cmd)
+      || cmd.endsWith('?');
+
     // Algorithm/snippet generation — "create/write/generate code for fibonacci/factorial/etc."
     // This must run BEFORE project-specific commands so "create fibonacci" doesn't hit cmdGenerateCode (which edits files)
-    const isAlgoRequest = (cmd.includes('create') || cmd.includes('write') || cmd.includes('generate') ||
-                          cmd.includes('code for') || cmd.includes('code to') || cmd.includes('give me') ||
-                          cmd.includes('show me')) && !/project|component|service|module|folder|file|app/i.test(cmd);
+    const isAlgoRequest = !isKnowledgeQuestion
+      && (cmd.includes('create') || cmd.includes('write') || cmd.includes('generate') ||
+          cmd.includes('code for') || cmd.includes('code to') || cmd.includes('give me') ||
+          cmd.includes('show me'))
+      && !/project|component|service|module|folder|file|app/i.test(cmd);
     if (isAlgoRequest) {
       const snippet = this.algos.find(input);
       if (snippet) return this.cmdAlgorithm(snippet);
     }
-    // Also try bare requests like "fibonacci" or "palindrome check"
-    if (cmd.split(/\s+/).length <= 4 && !cmd.includes('?')) {
+    // Also try bare requests like "fibonacci" or "palindrome check" — but NOT
+    // "what is X" style queries, which are knowledge lookups.
+    if (!isKnowledgeQuestion && cmd.split(/\s+/).length <= 4 && !cmd.includes('?')) {
       const snippet = this.algos.find(input);
       if (snippet) return this.cmdAlgorithm(snippet);
     }
@@ -765,7 +881,7 @@ export class AIEngineService {
   }
 
   /** Auto-create generated files: add to IDE tree + write to disk */
-  private async autoCreateFiles(files: { path: string; content: string }[], report: ProjectReport): Promise<void> {
+  private async autoCreateFiles(files: { path: string; content: string }[], report: ProjectReport): Promise<{ written: number; failed: number }> {
     const basePath = this.projectBasePath || this.scanner?.projectBasePath() || '';
     const folderName = report?.tree?.name || 'project';
 
@@ -783,32 +899,12 @@ export class AIEngineService {
       }
     }
 
-    // 2. Write to disk if base path is set
-    if (basePath) {
-      const sep = basePath.includes('\\') ? '\\' : '/';
-
-      // Collect unique parent folders and create them first
-      const folders = new Set<string>();
-      for (const f of files) {
-        const parts = f.path.split('/');
-        for (let i = 1; i <= parts.length - 1; i++) {
-          folders.add(parts.slice(0, i).join('/'));
-        }
-      }
-      // Create parent folders (sorted by depth so parents come first)
-      const sortedFolders = Array.from(folders).sort((a, b) => a.split('/').length - b.split('/').length);
-      for (const folder of sortedFolders) {
-        const fullFolder = basePath + sep + folder.replace(/\//g, sep);
-        await this.fs.createFolder(fullFolder);
-      }
-
-      // Write all files
-      const diskFiles = files.map(f => ({
-        path: basePath + sep + f.path.replace(/\//g, sep),
-        content: f.content,
-      }));
-      await this.fs.writeFiles(diskFiles);
+    // 2. Write to disk — FSA handle takes precedence; otherwise use backend absolute path.
+    if (!this.fs.hasHandle() && !basePath) {
+      return { written: 0, failed: files.length };
     }
+    const result = await this.fs.saveProjectFiles(files, basePath || undefined);
+    return { written: result.success.length, failed: result.failed.length };
   }
 
   // ===== AUTO CODE (test automation) =====
@@ -916,24 +1012,52 @@ export class AIEngineService {
     }
     this.scanner.report.set(newReport);
 
-    // Write to disk if basePath is set
+    // Write to disk — FSA handle takes precedence; backend absolute-path write is the fallback.
     let diskResult: { success: string[]; failed: string[] } | null = null;
-    if (basePath) {
-      const sep = basePath.includes('\\') ? '\\' : '/';
-      const diskFiles = template.files.map(f => ({
-        path: basePath + sep + f.path.replace(/\//g, sep),
-        content: f.content,
-      }));
-      diskResult = await this.fs.writeFiles(diskFiles);
+    const canWriteDisk = this.fs.hasHandle() || !!basePath;
+    if (canWriteDisk) {
+      diskResult = await this.fs.saveProjectFiles(template.files, basePath || undefined);
     }
+    const diskLocation = this.fs.hasHandle() ? this.fs.rootName() : basePath;
 
     const steps: TaskStep[] = [
       { label: 'Analyzing template', status: 'done', detail: template.name },
       { label: 'Generating files', status: 'done', detail: `${template.files.length} files` },
       { label: 'Writing to IDE tree', status: 'done', detail: `${newReport.totalFiles} visible` },
-      { label: basePath ? 'Saving to disk' : 'Disk save skipped', status: 'done',
-        detail: basePath ? `${diskResult?.success.length || 0} written to ${basePath}` : 'no disk path set' },
+      { label: canWriteDisk ? 'Saving to disk' : 'Disk save skipped', status: 'done',
+        detail: canWriteDisk ? `${diskResult?.success.length || 0}/${template.files.length} written to ${diskLocation}` : 'no disk link' },
     ];
+
+    // Fast-install via shared node_modules cache — first scaffold pays ~2 min,
+    // subsequent scaffolds with the same deps junction-link in milliseconds.
+    // Only runs when we actually wrote to an absolute disk path (the backend
+    // needs it to locate the project). Best-effort: failure just leaves the
+    // user to run `npm install` manually.
+    let installResult: { cacheHit: boolean; installedNow: boolean; linked: boolean; durationMs: number; skipReason?: string } | null = null;
+    const absProjectPath = canWriteDisk && basePath ? `${basePath}` : null;
+    const hasPackageJson = template.files.some(f => f.path === 'package.json');
+    if (absProjectPath && hasPackageJson && !isPatch) {
+      try {
+        const res = await fetch(`${this.fs.getBackendUrl()}/api/scaffold/fast-install`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: absProjectPath }),
+        });
+        if (res.ok) {
+          installResult = await res.json();
+          const detail = installResult!.cacheHit
+            ? `cache hit — linked in ${installResult!.durationMs} ms`
+            : installResult!.installedNow
+              ? `first install cached (${(installResult!.durationMs / 1000).toFixed(1)} s) — future scaffolds will be instant`
+              : installResult!.skipReason || 'skipped';
+          steps.push({ label: 'Installing deps', status: 'done', detail });
+        } else {
+          steps.push({ label: 'Installing deps', status: 'done', detail: 'skipped (backend error)' });
+        }
+      } catch {
+        steps.push({ label: 'Installing deps', status: 'done', detail: 'skipped (backend unreachable)' });
+      }
+    }
 
     // Auto-open the first meaningful file (server.js if fullstack, app.component.ts otherwise)
     const preferFiles = ['backend/server.js', 'frontend/src/app/app.component.ts', 'src/app/app.component.ts', 'server.js', 'README.md'];
@@ -956,14 +1080,14 @@ export class AIEngineService {
     let text = `**${isPatch ? 'Patch Applied' : 'Project Generated'}: ${template.name}**\n\n`;
     text += `${isPatch ? 'Modified' : 'Created'} **${template.files.length} file${template.files.length === 1 ? '' : 's'}** in \`${folderName}/\`\n\n`;
 
-    if (basePath && diskResult) {
-      text += `**Saved to disk:** \`${basePath}\`\n`;
+    if (canWriteDisk && diskResult) {
+      text += `**Saved to disk:** \`${diskLocation}\`\n`;
       text += `${diskResult.success.length} written`;
-      if (diskResult.failed.length > 0) text += `, ${diskResult.failed.length} failed`;
+      if (diskResult.failed.length > 0) text += `, ⚠️ ${diskResult.failed.length} failed`;
       text += `\n\n`;
-    } else if (!basePath) {
-      text += `**⚠️ No disk path** — files are in IDE memory only.\n`;
-      text += `To save to disk, close this workspace, click "+ New Empty Project" and enter a disk path like \`C:\\Projects\`.\n\n`;
+    } else {
+      text += `**⚠️ No disk link** — files are in IDE memory only and will be lost on refresh.\n`;
+      text += `Re-open the folder with the picker (it now uses the File System Access API) to enable disk writes.\n\n`;
     }
 
     text += `**${isPatch ? 'Files Updated' : 'Structure'}:**\n${folderList}\n\n`;
@@ -986,10 +1110,20 @@ export class AIEngineService {
       text += `\`\`\`bash\n# Backend\ncd ${folderName}/backend\nnpm install\n# Create .env with MONGO_URI and JWT_SECRET\nnpm run dev\n\n# Frontend (new terminal)\ncd ${folderName}/frontend\nnpm install\nng serve\n\`\`\`\n\n`;
       text += `Click any file in the Explorer to view/edit. Use the terminal below to run commands.`;
     } else if (templateId.includes('angular')) {
-      text += `**Next steps:**\n\`\`\`bash\ncd ${folderName}\nnpm install\nng serve\n\`\`\`\n\n`;
+      if (installResult?.linked) {
+        text += `**Next steps:**\n\`\`\`bash\ncd ${folderName}\nng serve\n\`\`\`\n`;
+        text += `_Deps linked from shared cache — skip \`npm install\`._\n\n`;
+      } else {
+        text += `**Next steps:**\n\`\`\`bash\ncd ${folderName}\nnpm install\nng serve\n\`\`\`\n\n`;
+      }
       text += `Click any file in the Explorer to view/edit.`;
     } else {
-      text += `**Next steps:**\n\`\`\`bash\ncd ${folderName}\nnpm install\nnpm run dev\n\`\`\``;
+      if (installResult?.linked) {
+        text += `**Next steps:**\n\`\`\`bash\ncd ${folderName}\nnpm run dev\n\`\`\`\n`;
+        text += `_Deps linked from shared cache — skip \`npm install\`._`;
+      } else {
+        text += `**Next steps:**\n\`\`\`bash\ncd ${folderName}\nnpm install\nnpm run dev\n\`\`\``;
+      }
     }
 
     return { id: '', role: 'ai', text, timestamp: new Date(), steps };
@@ -1231,7 +1365,7 @@ export class AIEngineService {
     };
   }
 
-  private cmdEnhanceProject(input: string, report: ProjectReport): ChatMessage {
+  private async cmdEnhanceProject(input: string, report: ProjectReport): Promise<ChatMessage> {
     const cmd = input.toLowerCase();
     // Detect style-only requests — offer CSS snippets instead of full file replacement
     if (/\b(style|styling|look|appearance|color|design|theme|banner|background)\b/i.test(cmd)
@@ -1286,7 +1420,7 @@ export class AIEngineService {
   }
 
   /** Apply a matched enhancement to a specific file: update scanner + write to disk + format response */
-  private applyEnhancement(match: import('./enhancements.service').Enhancement, targetFile: ProjectFile, report: ProjectReport): ChatMessage {
+  private async applyEnhancement(match: import('./enhancements.service').Enhancement, targetFile: ProjectFile, report: ProjectReport): Promise<ChatMessage> {
     if (!this.scanner) {
       return { id: '', role: 'ai', text: 'Scanner not available.', timestamp: new Date() };
     }
@@ -1310,24 +1444,28 @@ export class AIEngineService {
     setTimeout(() => this.scanner!.selectedFilePath.set(targetFile.path), 10);
 
     const basePath = this.scanner.projectBasePath();
+    const canWriteDisk = this.fs.hasHandle() || !!basePath;
     let diskWritten = false;
-    if (basePath) {
-      const sep = basePath.includes('\\') ? '\\' : '/';
-      const rel = targetFile.path.startsWith(folderName + '/')
-        ? targetFile.path.slice(folderName.length + 1)
-        : targetFile.path;
-      const fullPath = basePath + sep + rel.replace(/\//g, sep);
-      this.fs.writeFile(fullPath, newContent);
-      diskWritten = true;
+    let writeError = '';
+    if (canWriteDisk) {
+      diskWritten = await this.fs.saveProjectFile(targetFile.path, newContent, basePath || undefined);
+      if (!diskWritten) writeError = 'write call returned false';
     }
 
+    const location = this.fs.hasHandle() ? this.fs.rootName() : basePath;
     let text = `## ✨ Enhancement Applied: ${match.name}\n\n`;
     text += `${match.description}\n\n`;
     text += `**File updated:** \`${targetFile.path}\`\n`;
-    text += basePath ? `**Saved to disk:** \`${basePath}\`\n\n` : `**Saved in IDE memory only.**\n\n`;
+    if (diskWritten) {
+      text += `**Saved to disk:** \`${location}\`\n\n`;
+    } else if (canWriteDisk) {
+      text += `**⚠️ Disk save failed** (${writeError}). File is only in IDE memory — it will be lost on refresh.\n\n`;
+    } else {
+      text += `**⚠️ No disk link.** Re-open the folder with the picker so the IDE can write to disk.\n\n`;
+    }
     text += `### What changed\n`;
     text += match.changes.map(c => `- ${c}`).join('\n');
-    text += `\n\n### Run it\n\`\`\`bash\ncd ${basePath || folderName}\nng serve\n\`\`\`\n\n`;
+    text += `\n\n### Run it\n\`\`\`bash\ncd ${location || folderName}\nng serve\n\`\`\`\n\n`;
     text += `Click \`${targetFile.name}\` in the Explorer to see the updated code.`;
 
     return {
@@ -1336,7 +1474,11 @@ export class AIEngineService {
         { label: 'Parsed enhancement request', status: 'done', detail: match.name },
         { label: 'Located target file', status: 'done', detail: targetFile.path },
         { label: 'Applied patch', status: 'done', detail: `${newContent.split('\n').length} lines` },
-        { label: diskWritten ? 'Written to disk' : 'In-memory only', status: 'done', detail: diskWritten ? basePath : 'no disk path' },
+        {
+          label: diskWritten ? 'Written to disk' : (canWriteDisk ? 'Disk save failed' : 'In-memory only'),
+          status: 'done',
+          detail: diskWritten ? (location || 'handle') : (writeError || 'no disk path'),
+        },
       ],
     };
   }
@@ -1347,7 +1489,7 @@ export class AIEngineService {
    * Scan the current project / file for common Angular bugs related to what the user described.
    * Returns a fix message and auto-patches when safe.
    */
-  private cmdFixProjectBug(input: string, report: ProjectReport, currentFile?: ProjectFile): ChatMessage {
+  private async cmdFixProjectBug(input: string, report: ProjectReport, currentFile?: ProjectFile): Promise<ChatMessage> {
     const cmd = input.toLowerCase();
     const files = report.files;
 
@@ -1524,17 +1666,20 @@ export class AIEngineService {
       const newReport = { ...report, files: allFiles, tree };
       this.scanner.report.set(newReport as any);
 
-      if (basePath) {
-        const sep = basePath.includes('\\') ? '\\' : '/';
-        const rel = target.path.startsWith(report.tree?.name + '/')
-          ? target.path.slice((report.tree?.name || '').length + 1)
-          : target.path;
-        const fullPath = basePath + sep + rel.replace(/\//g, sep);
-        this.fs.writeFile(fullPath, content);
+      const canWriteDisk = this.fs.hasHandle() || !!basePath;
+      let diskOk = false;
+      if (canWriteDisk) {
+        diskOk = await this.fs.saveProjectFile(target.path, content, basePath || undefined);
       }
 
       text += `### ✅ Auto-patched\n`;
-      text += `The file \`${target.path}\` has been updated${basePath ? ' and written to disk' : ' in memory'}.\n\n`;
+      if (diskOk) {
+        text += `The file \`${target.path}\` has been updated **and written to disk**.\n\n`;
+      } else if (canWriteDisk) {
+        text += `The file \`${target.path}\` was updated in memory but **⚠️ the disk write failed**. It will be lost on refresh.\n\n`;
+      } else {
+        text += `The file \`${target.path}\` was updated in memory only. **⚠️ Re-open the folder with the picker to enable disk writes.**\n\n`;
+      }
       text += `**Click the file in the Explorer to see the changes.**`;
     } else {
       text += `### 📋 Apply manually\n`;
@@ -2380,27 +2525,67 @@ app.listen(process.env.PORT || 3000, () => {
   // ===== KNOWLEDGE BASE (Offline Q&A) =====
 
   private async cmdKnowledge(input: string): Promise<ChatMessage> {
-    // 1. Try offline local knowledge base first (fastest)
+    // Long-term memory: retrieve semantically similar past turns for this user.
+    // Runs in parallel with KB lookups; appended to answers as "Related from your history".
+    const memoryPromise = this.history.searchMemory(input, 3).catch(() => []);
+
+    // 1. Try offline local knowledge base first (fastest, zero network)
     const localAnswer = answerQuestion(input);
     const isFallback = localAnswer.startsWith("I don't have information");
 
     if (!isFallback) {
-      return { id: '', role: 'ai', text: localAnswer, timestamp: new Date() };
-    }
-
-    // 2. Local miss — try MongoDB knowledge base
-    const mongoAnswer = await this.kbApi.answer(input);
-    if (mongoAnswer && mongoAnswer.source !== 'not_found') {
+      const memories = await memoryPromise;
       return {
         id: '', role: 'ai',
-        text: mongoAnswer.answer,
+        text: this.attachMemoryContext(localAnswer, memories),
+        timestamp: new Date(),
+        steps: memories.length ? [{ label: 'Memory', status: 'done', detail: `${memories.length} related past turns` }] : undefined,
+      };
+    }
+
+    // 2. Local miss — try semantic vector search (RAG over KB)
+    const rag = await this.kbApi.ragAnswer(input, 3);
+    if (rag && rag.answer && rag.source === 'vector') {
+      const memories = await memoryPromise;
+      const ctx = (rag.context || []).map(c => `${c.title} (${c.score.toFixed(2)})`).join(', ');
+      return {
+        id: '', role: 'ai',
+        text: this.attachMemoryContext(rag.answer, memories),
+        timestamp: new Date(),
+        steps: [
+          { label: 'Source', status: 'done', detail: `RAG vector search — ${ctx}` },
+          ...(memories.length ? [{ label: 'Memory', status: 'done' as const, detail: `${memories.length} related past turns` }] : []),
+        ],
+      };
+    }
+
+    // 3. RAG miss — fall back to keyword/text search in MongoDB
+    const mongoAnswer = await this.kbApi.answer(input);
+    if (mongoAnswer && mongoAnswer.source !== 'not_found') {
+      const memories = await memoryPromise;
+      return {
+        id: '', role: 'ai',
+        text: this.attachMemoryContext(mongoAnswer.answer, memories),
         timestamp: new Date(),
         steps: [{ label: 'Source', status: 'done', detail: `MongoDB KB (${mongoAnswer.source})` }],
       };
     }
 
-    // 3. Both missed — return local fallback (has helpful suggestions)
-    return { id: '', role: 'ai', text: localAnswer, timestamp: new Date() };
+    // 4. All missed — return local fallback (has helpful suggestions)
+    const memories = await memoryPromise;
+    return {
+      id: '', role: 'ai',
+      text: this.attachMemoryContext(localAnswer, memories),
+      timestamp: new Date(),
+    };
+  }
+
+  // Memory is still fetched (so the "Memory: N related past turns" step indicator works
+  // and so future ranking can use it), but we no longer paste it into the visible reply —
+  // user feedback was that the block was noisy. Chat history still stores every message
+  // via POST /api/chat/message regardless of what this returns.
+  private attachMemoryContext(answer: string, _memories: { role: string; text: string; score: number }[]): string {
+    return answer;
   }
 
   // ===== AI MODULE COMMANDS =====

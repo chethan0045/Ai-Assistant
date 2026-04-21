@@ -19,6 +19,31 @@ export interface AnswerResponse {
   source: string;
 }
 
+export interface VectorHit {
+  topic: string;
+  category: string;
+  title: string;
+  summary: string;
+  details: string;
+  examples?: string[];
+  related?: string[];
+  score: number;
+}
+
+export interface VectorSearchResponse {
+  results: VectorHit[];
+  count: number;
+  source: string;
+}
+
+export interface RagAnswerResponse {
+  answer: string;
+  topic?: string;
+  source: string;
+  context?: { topic: string; title: string; score: number }[];
+  topScore?: number;
+}
+
 @Injectable({ providedIn: 'root' })
 export class KnowledgeApiService {
   private baseUrl = '';
@@ -64,6 +89,30 @@ export class KnowledgeApiService {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ request }),
+      });
+      if (!res.ok) return null;
+      return res.json();
+    } catch { return null; }
+  }
+
+  async searchVector(q: string, limit = 5): Promise<VectorSearchResponse | null> {
+    try {
+      const url = await this.ensureUrl();
+      if (!url) return null;
+      const res = await fetch(`${url}/search-vector?q=${encodeURIComponent(q)}&limit=${limit}`);
+      if (!res.ok) return null;
+      return res.json();
+    } catch { return null; }
+  }
+
+  async ragAnswer(question: string, k = 3): Promise<RagAnswerResponse | null> {
+    try {
+      const url = await this.ensureUrl();
+      if (!url) return null;
+      const res = await fetch(`${url}/rag-answer`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question, k }),
       });
       if (!res.ok) return null;
       return res.json();

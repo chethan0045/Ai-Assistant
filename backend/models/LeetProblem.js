@@ -16,6 +16,10 @@ const leetProblemSchema = new mongoose.Schema({
   code: { type: String, required: true },
   tests: { type: String, default: '' },
   relatedNumbers: [{ type: Number }],
+  // Vector representation for cross-collection semantic search. Built from
+  // number/title/topics/keywords + description preview. Filled lazily by
+  // backfill-embeddings.js or on-demand by seeds.
+  embedding: { type: [Number], default: undefined },
 }, { timestamps: true });
 
 leetProblemSchema.index({ title: 'text', description: 'text', keywords: 'text' });

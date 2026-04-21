@@ -1,14 +1,19 @@
-import { Component } from '@angular/core';
+import { Component, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { Router } from '@angular/router';
 import { AuthService } from './services/auth.service';
+import { ThemeService } from './services/theme.service';
 
 @Component({
   selector: 'app-home',
   standalone: true,
   imports: [CommonModule, FormsModule],
   template: `
+    <button class="app-theme-toggle" (click)="themeSvc.toggle()" [title]="themeSvc.isDark() ? 'Switch to Light' : 'Switch to Dark'">
+      <svg *ngIf="themeSvc.isDark()" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+      <svg *ngIf="themeSvc.isLight()" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+    </button>
     <div class="auth-page">
       <div class="auth-card">
         <!-- Logo -->
@@ -119,58 +124,62 @@ import { AuthService } from './services/auth.service';
       background: linear-gradient(135deg, #0f0c29 0%, #1a1440 40%, #302b63 70%, #24243e 100%);
       padding: 20px;
     }
+    :host-context(body.theme-light) .auth-page {
+      background: linear-gradient(135deg, #e0e7ff 0%, #c7d2fe 40%, #a5b4fc 70%, #e0e7ff 100%);
+    }
     .auth-card {
-      background: rgba(255,255,255,0.04);
+      background: var(--bg-panel);
       backdrop-filter: blur(24px);
-      border: 1px solid rgba(255,255,255,0.08);
+      border: 1px solid var(--border-primary);
       border-radius: 20px;
       padding: 40px;
       width: 420px;
       max-width: 95vw;
       box-shadow: 0 20px 60px rgba(0,0,0,0.3);
     }
+    :host-context(body.theme-light) .auth-card { background: rgba(255,255,255,0.9); box-shadow: 0 20px 60px rgba(99,102,241,0.15); }
 
     .logo-section { text-align: center; margin-bottom: 32px; }
     .logo-icon {
       display: inline-flex; align-items: center; justify-content: center;
       width: 64px; height: 64px; border-radius: 16px;
-      background: linear-gradient(135deg, #6366f1, #8b5cf6);
+      background: linear-gradient(135deg, var(--accent-deep), var(--accent-purple-deep));
       font-size: 24px; font-weight: 800; color: #fff;
       font-family: 'Inter', sans-serif;
       box-shadow: 0 8px 24px rgba(99,102,241,0.4);
       margin-bottom: 12px;
     }
-    .logo-sub { color: rgba(255,255,255,0.4); font-size: 13px; margin: 0; }
+    .logo-sub { color: var(--text-muted); font-size: 13px; margin: 0; }
 
-    h2 { color: #fff; font-size: 22px; font-weight: 700; margin: 0 0 4px; }
-    .form-sub { color: rgba(255,255,255,0.45); font-size: 13px; margin: 0 0 24px; }
-    .form-sub strong { color: #818cf8; }
+    h2 { color: var(--text-primary); font-size: 22px; font-weight: 700; margin: 0 0 4px; }
+    .form-sub { color: var(--text-muted); font-size: 13px; margin: 0 0 24px; }
+    .form-sub strong { color: var(--accent); }
 
     .form-group { margin-bottom: 16px; }
-    label { display: block; color: rgba(255,255,255,0.6); font-size: 12px; font-weight: 500; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px; }
+    label { display: block; color: var(--text-secondary); font-size: 12px; font-weight: 500; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px; }
     input {
       width: 100%; padding: 12px 16px;
-      background: rgba(255,255,255,0.05);
-      border: 1px solid rgba(255,255,255,0.12);
+      background: var(--bg-input);
+      border: 1px solid var(--border-primary);
       border-radius: 10px;
-      color: #fff; font-size: 14px; font-family: 'Inter', sans-serif;
+      color: var(--text-primary); font-size: 14px; font-family: 'Inter', sans-serif;
       outline: none; box-sizing: border-box;
       transition: border-color 0.2s;
     }
-    input:focus { border-color: #818cf8; box-shadow: 0 0 0 3px rgba(129,140,248,0.15); }
-    input::placeholder { color: rgba(255,255,255,0.2); }
+    input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-focus-bg); }
+    input::placeholder { color: var(--text-dim); }
 
     .password-field { position: relative; }
     .password-field input { padding-right: 64px; }
     .eye-btn {
       position: absolute; right: 12px; top: 50%; transform: translateY(-50%);
-      background: none; border: none; color: #818cf8; font-size: 12px;
+      background: none; border: none; color: var(--accent); font-size: 12px;
       cursor: pointer; font-family: 'Inter', sans-serif; font-weight: 500;
     }
 
     .submit-btn {
       width: 100%; padding: 14px;
-      background: linear-gradient(135deg, #6366f1, #8b5cf6);
+      background: linear-gradient(135deg, var(--accent-deep), var(--accent-purple-deep));
       border: none; border-radius: 10px; color: #fff;
       font-size: 15px; font-weight: 600; cursor: pointer;
       margin-top: 8px; transition: all 0.2s;
@@ -178,16 +187,16 @@ import { AuthService } from './services/auth.service';
     }
     .submit-btn:hover:not(:disabled) { transform: translateY(-2px); box-shadow: 0 8px 24px rgba(99,102,241,0.4); }
     .submit-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-    .verify-btn { background: linear-gradient(135deg, #10b981, #06b6d4); }
+    .verify-btn { background: linear-gradient(135deg, var(--success-deep), #06b6d4); }
     .verify-btn:hover:not(:disabled) { box-shadow: 0 8px 24px rgba(16,185,129,0.4); }
 
-    .toggle-text { text-align: center; color: rgba(255,255,255,0.4); font-size: 13px; margin-top: 20px; }
-    .toggle-text span { color: #818cf8; cursor: pointer; font-weight: 500; }
+    .toggle-text { text-align: center; color: var(--text-muted); font-size: 13px; margin-top: 20px; }
+    .toggle-text span { color: var(--accent); cursor: pointer; font-weight: 500; }
     .toggle-text span:hover { text-decoration: underline; }
 
     .alert { padding: 10px 14px; border-radius: 10px; font-size: 13px; margin-bottom: 16px; }
-    .alert.error { background: rgba(239,68,68,0.12); color: #f87171; border: 1px solid rgba(239,68,68,0.2); }
-    .alert.success { background: rgba(16,185,129,0.12); color: #34d399; border: 1px solid rgba(16,185,129,0.2); }
+    .alert.error { background: rgba(239,68,68,0.12); color: var(--error); border: 1px solid rgba(239,68,68,0.2); }
+    .alert.success { background: rgba(16,185,129,0.12); color: var(--success); border: 1px solid rgba(16,185,129,0.2); }
 
     /* OTP */
     .otp-container { display: flex; gap: 10px; justify-content: center; margin: 28px 0; }
@@ -195,21 +204,21 @@ import { AuthService } from './services/auth.service';
       width: 48px; height: 56px; text-align: center;
       font-size: 22px; font-weight: 700; letter-spacing: 0;
       border-radius: 12px;
-      background: rgba(255,255,255,0.06);
-      border: 2px solid rgba(255,255,255,0.12);
-      color: #fff;
-      caret-color: #818cf8;
+      background: var(--bg-input);
+      border: 2px solid var(--border-primary);
+      color: var(--text-primary);
+      caret-color: var(--accent);
       padding: 0;
     }
-    .otp-input:focus { border-color: #818cf8; background: rgba(129,140,248,0.08); }
+    .otp-input:focus { border-color: var(--accent); background: var(--accent-focus-bg); }
 
     .resend-row { display: flex; align-items: center; justify-content: center; gap: 8px; margin-top: 16px; }
-    .resend-text { font-size: 13px; color: rgba(255,255,255,0.4); }
+    .resend-text { font-size: 13px; color: var(--text-muted); }
     .resend-btn {
-      background: none; border: none; color: #818cf8; font-size: 13px;
+      background: none; border: none; color: var(--accent); font-size: 13px;
       font-weight: 600; cursor: pointer; font-family: 'Inter', sans-serif;
     }
-    .resend-btn:disabled { color: rgba(255,255,255,0.3); cursor: not-allowed; }
+    .resend-btn:disabled { color: var(--text-dim); cursor: not-allowed; }
 
     @media (max-width: 480px) {
       .auth-card { padding: 28px 20px; }
@@ -231,6 +240,8 @@ export class HomeComponent {
   otpComplete = '';
   resendCooldown = 0;
   private cooldownTimer: any = null;
+
+  readonly themeSvc = inject(ThemeService);
 
   constructor(private router: Router, private auth: AuthService) {
     if (this.auth.isLoggedIn()) {

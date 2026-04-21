@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { KnowledgeEntry, DirectAnswer } = require('../models/Knowledge');
+const { embed, cosineSim } = require('../services/embeddings');
 
 // ===== STOP WORDS =====
 const STOP_WORDS = new Set([
@@ -109,6 +110,87 @@ router.get('/search', async (req, res) => {
   }
 });
 
+// ===== VECTOR SEARCH (RAG retrieval) =====
+// Embeds query with MiniLM, ranks KB entries by cosine similarity in-app.
+// Scales fine for a few thousand docs; swap for Atlas $vectorSearch if KB grows.
+router.get('/search-vector', async (req, res) => {
+  try {
+    const { q, limit = 5, minScore = 0.3 } = req.query;
+    if (!q) return res.status(400).json({ error: 'q parameter required' });
+
+    const queryVec = await embed(q.toString());
+    const entries = await KnowledgeEntry.find({ embedding: { $exists: true, $ne: [] } });
+
+    const scored = entries
+      .map(e => ({ entry: e, score: cosineSim(queryVec, e.embedding) }))
+      .filter(s => s.score >= Number(minScore))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, Number(limit));
+
+    res.json({
+      results: scored.map(s => ({
+        topic: s.entry.topic,
+        category: s.entry.category,
+        title: s.entry.title,
+        summary: s.entry.summary,
+        details: s.entry.details,
+        examples: s.entry.examples,
+        related: s.entry.related,
+        score: s.score,
+      })),
+      count: scored.length,
+      source: 'vector',
+    });
+  } catch (err) {
+    console.error('Vector search error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ===== RAG ANSWER =====
+// Retrieves top-k semantically similar entries, composes an answer from them.
+router.post('/rag-answer', async (req, res) => {
+  try {
+    const { question, k = 3 } = req.body;
+    if (!question) return res.status(400).json({ error: 'question required' });
+
+    const queryVec = await embed(question);
+    const entries = await KnowledgeEntry.find({ embedding: { $exists: true, $ne: [] } });
+    if (entries.length === 0) {
+      return res.json({ answer: '', context: [], source: 'vector_empty' });
+    }
+
+    const ranked = entries
+      .map(e => ({ entry: e, score: cosineSim(queryVec, e.embedding) }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, Number(k));
+
+    const top = ranked[0];
+    if (!top || top.score < 0.25) {
+      return res.json({ answer: '', context: [], source: 'vector_low_confidence', topScore: top?.score ?? 0 });
+    }
+
+    const e = top.entry;
+    let answer = `**${e.title}**\n\n${e.summary}\n\n${e.details}`;
+    if (e.examples?.length) answer += '\n\n' + e.examples[0];
+
+    const supporting = ranked.slice(1).filter(r => r.score >= 0.35);
+    if (supporting.length > 0) {
+      answer += `\n\n---\n*Related: ${supporting.map(s => s.entry.title).join(', ')}*`;
+    }
+
+    res.json({
+      answer,
+      topic: e.topic,
+      source: 'vector',
+      context: ranked.map(r => ({ topic: r.entry.topic, title: r.entry.title, score: r.score })),
+    });
+  } catch (err) {
+    console.error('RAG answer error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ===== ANSWER A QUESTION =====
 router.post('/answer', async (req, res) => {
   try {
@@ -129,16 +211,46 @@ router.post('/answer', async (req, res) => {
       });
     }
 
-    // 2. Check direct answers (regex patterns)
+    // 2a. Check direct answers — regex first (fast, exact, deterministic).
     const directAnswers = await DirectAnswer.find().sort({ priority: -1 });
     for (const da of directAnswers) {
       for (const pattern of da.patterns) {
         try {
           if (new RegExp(pattern, 'i').test(q)) {
-            return res.json({ answer: da.answer, topic: da.topic, source: 'direct' });
+            return res.json({ answer: da.answer, topic: da.topic, source: 'direct-regex' });
           }
         } catch {}
       }
+    }
+
+    // 2b. Semantic fallback over the same DirectAnswer pool. This catches
+    // paraphrases that regex misses — e.g. "how can I verify angular version
+    // installed" matching the DirectAnswer whose regex was `angular.*version`.
+    // Threshold 0.55 is conservative enough that unrelated queries don't
+    // hijack the answer; they fall through to the keyword/RAG layers below.
+    try {
+      const queryVec = await embed(q);
+      const withEmbeddings = directAnswers.filter(da => Array.isArray(da.embedding) && da.embedding.length);
+      if (withEmbeddings.length) {
+        let best = null;
+        let bestScore = 0;
+        for (const da of withEmbeddings) {
+          const s = cosineSim(queryVec, da.embedding);
+          if (s > bestScore) { best = da; bestScore = s; }
+        }
+        if (best && bestScore >= 0.55) {
+          return res.json({
+            answer: best.answer,
+            topic: best.topic,
+            source: 'direct-semantic',
+            score: Number(bestScore.toFixed(3)),
+            matchedQuestion: best.question || undefined,
+          });
+        }
+      }
+    } catch (embedErr) {
+      // Embedding failure isn't fatal — just fall through to keyword search below.
+      console.warn('[knowledge/answer] semantic direct-answer lookup failed:', embedErr.message);
     }
 
     // 3. Strip question wrapper

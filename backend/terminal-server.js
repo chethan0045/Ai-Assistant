@@ -44,6 +44,29 @@ app.use('/api/git', gitRoutes);
 const leetcodeRoutes = require('./routes/leetcode');
 app.use('/api/leetcode', leetcodeRoutes);
 
+// ===== CHAT HISTORY ROUTES =====
+const chatRoutes = require('./routes/chat');
+app.use('/api/chat', chatRoutes);
+
+// ===== DEFECT DETECTION ROUTES =====
+const defectRoutes = require('./routes/defects');
+app.use('/api/defects', defectRoutes);
+
+// ===== GLOBAL SEARCH ROUTES =====
+const searchRoutes = require('./routes/search');
+app.use('/api/search', searchRoutes);
+
+// ===== SCAFFOLD FAST-INSTALL ROUTES =====
+// Shared node_modules cache — first scaffold installs into ~/.ai-scaffold-cache/<hash>/node_modules,
+// subsequent scaffolds with the same deps just junction-link into the new project in milliseconds.
+const scaffoldRoutes = require('./routes/scaffold');
+app.use('/api/scaffold', scaffoldRoutes);
+
+// Error-capture middleware MUST be mounted after all routes so anything that
+// throws or calls next(err) in an upstream handler reaches it.
+const { errorCapture } = require('./middleware/errorCapture');
+app.use(errorCapture());
+
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 

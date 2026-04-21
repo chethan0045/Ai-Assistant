@@ -1,13 +1,16 @@
-import { Component, OnInit, computed, Signal, ViewChild, ElementRef, AfterViewChecked, ChangeDetectorRef, effect, HostBinding } from '@angular/core';
+import { Component, OnInit, computed, Signal, ViewChild, ElementRef, AfterViewChecked, ChangeDetectorRef, effect, HostBinding, signal, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { Router } from '@angular/router';
+import { DomSanitizer, SafeResourceUrl } from '@angular/platform-browser';
 import { ProjectScannerService, ProjectReport, ProjectFile, FolderNode, FileIssue } from './services/project-scanner.service';
 import { CodeRunnerService } from './services/code-runner.service';
 import { SyntaxHighlightService } from './services/syntax-highlight.service';
 import { AIEngineService } from './services/ai-engine.service';
 import { FileSystemService } from './services/file-system.service';
 import { GitService } from './services/git.service';
+import { ThemeService } from './services/theme.service';
+import { SearchService, SearchHit } from './services/search.service';
 
 @Component({
   selector: 'app-scanner-ide',
@@ -37,6 +40,10 @@ import { GitService } from './services/git.service';
         <button class="pill story-pill click" (click)="goIssues('info')">
           <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/></svg>
           {{ report()?.totalInfos }} Stories
+        </button>
+        <button class="pill defect-pill click" (click)="goDefects()" title="View defects dashboard">
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+          Defects
         </button>
       </div>
       <button class="theme-toggle" (click)="toggleTheme()" [title]="darkMode ? 'Switch to Light Mode' : 'Switch to Dark Mode'">
@@ -105,7 +112,15 @@ import { GitService } from './services/git.service';
           <!-- Scanning spinner -->
           <div class="open-folder-empty" *ngIf="folderScanning">
             <div class="scan-spinner"></div>
-            <p class="open-folder-hint">Scanning folder...</p>
+            <p class="open-folder-hint">
+              <ng-container *ngIf="scanner.scanProgress().total > 0; else scanStarting">
+                Scanning folder... {{ scanner.scanProgress().current }} / {{ scanner.scanProgress().total }} files
+              </ng-container>
+              <ng-template #scanStarting>Scanning folder...</ng-template>
+            </p>
+            <div class="scan-bar" *ngIf="scanner.scanProgress().total > 0">
+              <div class="scan-bar-fill" [style.width.%]="(scanner.scanProgress().current / scanner.scanProgress().total) * 100"></div>
+            </div>
           </div>
           <!-- Tree loaded — show it -->
           <ng-container *ngIf="report()?.tree && !folderScanning">
@@ -230,12 +245,25 @@ import { GitService } from './services/git.service';
         </div>
       </div>
 
+      <!-- FOLDER-COLLECTING OVERLAY (FSA walk — runs before the trust dialog) -->
+      <div class="trust-overlay" *ngIf="folderCollecting">
+        <div class="trust-card">
+          <div class="scan-spinner"></div>
+          <h2>Reading folder...</h2>
+          <p class="trust-folder-name">{{ fs.collectProgress().count | number }} files found</p>
+          <p class="trust-desc">Walking the folder tree (skipping node_modules, .git, test artifacts, etc.). Large folders are capped at 10 000 files — you'll see a warning if we hit that.</p>
+        </div>
+      </div>
+
       <!-- TRUST FOLDER OVERLAY -->
       <div class="trust-overlay" *ngIf="showTrustDialog">
         <div class="trust-card">
           <div class="trust-icon">&#128274;</div>
           <h2>Do you trust the authors of this folder?</h2>
-          <p class="trust-folder-name">{{ pendingFolderName }}</p>
+          <p class="trust-folder-name">{{ pendingFolderName }} &middot; {{ pendingFileArray.length | number }} files</p>
+          <div class="trust-warn" *ngIf="folderTruncated">
+            &#9888;&#65039; File count was capped at 10 000. Some files are not loaded. Open a smaller subfolder if you need everything.
+          </div>
           <p class="trust-desc">Opening a folder will allow the IDE to read and edit files in it. Only trust folders from sources you know.</p>
           <div class="trust-actions">
             <button class="trust-btn trust-yes" (click)="confirmTrust()">Yes, I trust this folder</button>
@@ -358,9 +386,17 @@ import { GitService } from './services/git.service';
               Debug
               <span class="bp-badge active-debug" *ngIf="runner.debugState().paused">PAUSED</span>
             </button>
+            <button class="bp-tab" [class.active]="bottomTab === 'search'" (click)="openSearchTab()">
+              Search
+              <span class="bp-badge" *ngIf="searchResults().count > 0">{{ searchResults().count }}</span>
+            </button>
+            <button class="bp-tab" [class.active]="bottomTab === 'preview'" (click)="bottomTab = 'preview'">
+              Preview
+            </button>
             <div class="bp-tab-actions">
               <button class="bp-act" (click)="addTerminal()" *ngIf="bottomTab === 'terminal'" title="New Terminal">+</button>
               <button class="bp-act" (click)="runner.clearTerminal()" *ngIf="bottomTab === 'terminal'" title="Clear">&#128465;</button>
+              <button class="bp-act" (click)="reloadPreview()" *ngIf="bottomTab === 'preview'" title="Reload preview">&#8634;</button>
               <button class="bp-act" (click)="bottomPanelOpen = false" title="Close">&times;</button>
             </div>
           </div>
@@ -412,6 +448,63 @@ import { GitService } from './services/git.service';
               <div class="prob-empty" *ngIf="selectedFile()!.issues.length === 0">No problems detected</div>
             </div>
             <div class="prob-empty" *ngIf="!selectedFile()">Open a file to see problems</div>
+          </div>
+
+          <!-- Global search -->
+          <div class="bp-content search-content" *ngIf="bottomTab === 'search'">
+            <div class="search-bar">
+              <input class="search-input"
+                     [(ngModel)]="searchQuery"
+                     (keydown.enter)="runSearch()"
+                     placeholder="Search across project..."
+                     spellcheck="false" />
+              <label class="search-opt" title="Case-sensitive">
+                <input type="checkbox" [(ngModel)]="searchCase" /> Aa
+              </label>
+              <label class="search-opt" title="Treat as regex">
+                <input type="checkbox" [(ngModel)]="searchRegex" /> .*
+              </label>
+              <button class="search-go" (click)="runSearch()" [disabled]="searchRunning()">
+                {{ searchRunning() ? '...' : 'Find' }}
+              </button>
+            </div>
+            <div class="search-body">
+              <div class="search-summary" *ngIf="searchResults().query">
+                {{ searchResults().count }} {{ searchResults().count === 1 ? 'match' : 'matches' }}
+                for <strong>"{{ searchResults().query }}"</strong>
+                <span *ngIf="searchResults().count >= 200"> (capped)</span>
+              </div>
+              <div class="search-empty" *ngIf="searchResults().query && searchResults().count === 0">
+                No matches.
+              </div>
+              <div class="search-hit" *ngFor="let h of searchResults().results" (click)="openSearchHit(h)">
+                <span class="sh-path">{{ h.path }}</span>
+                <span class="sh-line">:{{ h.line }}</span>
+                <code class="sh-text">{{ h.text }}</code>
+              </div>
+            </div>
+          </div>
+
+          <!-- Live preview -->
+          <div class="bp-content preview-content" *ngIf="bottomTab === 'preview'">
+            <div class="preview-bar">
+              <input class="preview-url"
+                     [(ngModel)]="previewUrl"
+                     (keydown.enter)="reloadPreview()"
+                     placeholder="http://localhost:4200"
+                     spellcheck="false" />
+              <button class="preview-go" (click)="reloadPreview()">Go</button>
+              <a class="preview-external" [href]="previewUrl" target="_blank" rel="noopener" title="Open in new tab">&#8599;</a>
+            </div>
+            <iframe class="preview-frame"
+                    *ngIf="previewSrc()"
+                    [src]="previewSrc()"
+                    sandbox="allow-scripts allow-same-origin allow-forms allow-popups"></iframe>
+            <div class="preview-empty" *ngIf="!previewSrc()">
+              Enter a URL above (e.g., <code>http://localhost:4200</code>) and click <strong>Go</strong>.
+              <br><br>
+              <span class="preview-hint">Run your dev server in the Terminal tab first (<code>ng serve</code>, <code>npm start</code>, etc.), then preview it here.</span>
+            </div>
           </div>
 
           <!-- Debug -->
@@ -489,12 +582,38 @@ import { GitService } from './services/git.service';
             <span class="ai-badge on">Built-in</span>
           </div>
           <div class="ai-hdr-right">
-            <button class="ai-icon-btn" (click)="ai.clearChat()" title="New conversation">
+            <button class="ai-icon-btn" (click)="toggleConvoList()" [class.active]="convoListOpen" title="Chat history">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+            </button>
+            <button class="ai-icon-btn" (click)="onNewConversation()" title="New conversation">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
             </button>
             <button class="ai-icon-btn close" (click)="aiPanelOpen = false" title="Close">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
             </button>
+          </div>
+        </div>
+
+        <!-- Conversations dropdown -->
+        <div class="ai-convo-list" *ngIf="convoListOpen">
+          <div class="ai-convo-hdr">
+            <span>History</span>
+            <span class="ai-convo-count">{{ ai.conversations().length }}</span>
+          </div>
+          <div class="ai-convo-empty" *ngIf="ai.conversations().length === 0">
+            No past conversations yet. Start chatting — each new thread will appear here.
+          </div>
+          <div *ngFor="let c of ai.conversations()"
+               class="ai-convo-item"
+               [class.active]="c._id === ai.activeConversationId()"
+               (click)="onSwitchConversation(c._id)">
+            <div class="ai-convo-title" [title]="c.title">{{ c.title }}</div>
+            <div class="ai-convo-meta">
+              <span>{{ c.messageCount }} msg</span>
+              <button class="ai-convo-del" (click)="onDeleteConversation(c._id, $event)" title="Delete">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-2 14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L5 6"/></svg>
+              </button>
+            </div>
           </div>
         </div>
 
@@ -508,8 +627,15 @@ import { GitService } from './services/git.service';
 
         <!-- Chat -->
         <div class="ai-chat" #aiChatEl>
+          <!-- History-hydrating skeleton (holds layout so incoming messages don't become LCP) -->
+          <div class="chat-skeleton" *ngIf="historyHydrating && ai.messages().length === 0">
+            <div class="sk-row sk-user"><div class="sk-bubble"></div></div>
+            <div class="sk-row sk-ai"><div class="sk-bubble wide"></div></div>
+            <div class="sk-row sk-user"><div class="sk-bubble narrow"></div></div>
+          </div>
+
           <!-- Welcome -->
-          <div class="ai-welcome" *ngIf="ai.messages().length === 0">
+          <div class="ai-welcome" *ngIf="!historyHydrating && ai.messages().length === 0">
             <div class="ai-welcome-logo">
               <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="url(#aiGrad)" stroke-width="1.5">
                 <defs><linearGradient id="aiGrad" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#818cf8"/><stop offset="100%" stop-color="#c084fc"/></linearGradient></defs>
@@ -550,6 +676,11 @@ import { GitService } from './services/git.service';
                 <span>Build Auth</span>
               </button>
             </div>
+          </div>
+
+          <!-- Load older -->
+          <div class="load-older" *ngIf="ai.hasMoreHistory() && ai.messages().length > 0">
+            <button class="load-older-btn" (click)="ai.loadFullHistory()">&uarr; Load older messages</button>
           </div>
 
           <!-- Messages -->
@@ -819,6 +950,7 @@ import { GitService } from './services/git.service';
     .epic-pill { background: rgba(167,139,250,0.1); color: var(--accent-purple); display: flex; align-items: center; gap: 4px; }
     .feature-pill { background: rgba(16,185,129,0.1); color: var(--success); display: flex; align-items: center; gap: 4px; }
     .story-pill { background: rgba(96,165,250,0.1); color: var(--info); display: flex; align-items: center; gap: 4px; }
+    .defect-pill { background: rgba(248,113,113,0.12); color: #f87171; display: flex; align-items: center; gap: 4px; }
     .theme-toggle { padding: 4px 8px; background: var(--accent-hover-bg); border: 1px solid var(--border-primary); border-radius: 6px; color: var(--text-muted); cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.2s; margin-left: 6px; flex-shrink: 0; }
     .theme-toggle:hover { background: var(--accent-focus-bg); color: var(--accent); border-color: var(--accent); }
 
@@ -835,6 +967,8 @@ import { GitService } from './services/git.service';
     .open-folder-empty { display: flex; flex-direction: column; align-items: center; padding: 32px 16px; gap: 12px; }
     .scan-spinner { width: 28px; height: 28px; border: 3px solid rgba(129,140,248,0.2); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.7s linear infinite; }
     @keyframes spin { to { transform: rotate(360deg); } }
+    .scan-bar { width: 160px; height: 3px; background: var(--border-primary); border-radius: 2px; margin-top: 8px; overflow: hidden; }
+    .scan-bar-fill { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-purple)); transition: width 0.15s ease; }
     .open-folder-btn { padding: 10px 24px; background: linear-gradient(135deg, var(--accent-deep), var(--accent-purple-deep)); border: none; border-radius: 8px; color: #fff; font-size: 13px; font-weight: 600; cursor: pointer; font-family: 'Inter', sans-serif; transition: all 0.2s; }
     .open-folder-btn:hover { transform: translateY(-1px); box-shadow: 0 6px 20px rgba(99,102,241,0.4); }
     .open-folder-btn.secondary { background: var(--accent-hover-bg); color: var(--text-muted); border: 1px solid var(--border-tertiary); }
@@ -854,6 +988,7 @@ import { GitService } from './services/git.service';
     .trust-card h2 { color: var(--text-primary); font-size: 18px; font-weight: 700; margin: 0 0 12px; }
     .trust-folder-name { color: var(--accent); font-size: 14px; font-weight: 600; font-family: 'JetBrains Mono', monospace; margin: 0 0 12px; word-break: break-all; }
     .trust-desc { color: var(--text-muted); font-size: 13px; line-height: 1.6; margin: 0 0 24px; }
+    .trust-warn { background: rgba(234,179,8,0.1); border: 1px solid var(--warning); color: var(--warning); padding: 8px 12px; border-radius: 6px; font-size: 12px; margin: 0 0 16px; line-height: 1.4; }
     .trust-actions { display: flex; gap: 12px; justify-content: center; }
     .trust-btn { padding: 11px 24px; border: none; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; font-family: 'Inter', sans-serif; transition: all 0.2s; }
     .trust-yes { background: linear-gradient(135deg, var(--accent-deep), var(--accent-purple-deep)); color: #fff; }
@@ -1118,6 +1253,38 @@ import { GitService } from './services/git.service';
 
     .bp-content { flex: 1; overflow-y: auto; }
 
+    /* Global search panel */
+    .search-content { display: flex; flex-direction: column; height: 100%; }
+    .search-bar { display: flex; gap: 6px; align-items: center; padding: 6px 8px; border-bottom: 1px solid var(--border-primary); background: var(--bg-panel); }
+    .search-input { flex: 1; background: var(--bg-input); border: 1px solid var(--border-primary); border-radius: 4px; color: var(--text-primary); padding: 5px 8px; font-size: 12px; outline: none; }
+    .search-input:focus { border-color: var(--accent); }
+    .search-opt { display: flex; align-items: center; gap: 3px; font-size: 10px; color: var(--text-muted); cursor: pointer; user-select: none; }
+    .search-opt input { margin: 0; }
+    .search-go { background: var(--accent); color: #fff; border: none; border-radius: 4px; padding: 5px 12px; font-size: 11px; cursor: pointer; }
+    .search-go:disabled { opacity: 0.6; cursor: not-allowed; }
+    .search-body { flex: 1; overflow-y: auto; padding: 6px 0; }
+    .search-summary { padding: 6px 10px; font-size: 11px; color: var(--text-muted); }
+    .search-summary strong { color: var(--accent); }
+    .search-empty { padding: 20px; text-align: center; color: var(--text-muted); font-size: 12px; }
+    .search-hit { display: flex; align-items: baseline; gap: 6px; padding: 4px 10px; font-size: 11px; cursor: pointer; border-top: 1px solid var(--border-secondary); }
+    .search-hit:hover { background: var(--accent-hover-bg); }
+    .sh-path { color: var(--text-tertiary); font-family: 'JetBrains Mono', monospace; font-weight: 500; flex-shrink: 0; }
+    .sh-line { color: var(--accent); font-family: 'JetBrains Mono', monospace; flex-shrink: 0; }
+    .sh-text { color: var(--text-muted); font-family: 'JetBrains Mono', monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; background: transparent; padding: 0; }
+
+    /* Live preview panel */
+    .preview-content { display: flex; flex-direction: column; height: 100%; }
+    .preview-bar { display: flex; gap: 6px; align-items: center; padding: 6px 8px; border-bottom: 1px solid var(--border-primary); background: var(--bg-panel); }
+    .preview-url { flex: 1; background: var(--bg-input); border: 1px solid var(--border-primary); border-radius: 4px; color: var(--text-primary); padding: 5px 8px; font-size: 12px; outline: none; font-family: 'JetBrains Mono', monospace; }
+    .preview-url:focus { border-color: var(--accent); }
+    .preview-go { background: var(--accent); color: #fff; border: none; border-radius: 4px; padding: 5px 12px; font-size: 11px; cursor: pointer; }
+    .preview-external { color: var(--accent); text-decoration: none; padding: 5px 8px; font-size: 14px; border: 1px solid var(--border-primary); border-radius: 4px; }
+    .preview-external:hover { background: var(--accent-hover-bg); }
+    .preview-frame { flex: 1; border: none; background: #fff; width: 100%; }
+    .preview-empty { flex: 1; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; color: var(--text-muted); padding: 30px; font-size: 13px; line-height: 1.6; }
+    .preview-empty code { background: var(--bg-code); padding: 2px 6px; border-radius: 3px; }
+    .preview-hint { font-size: 11px; opacity: 0.75; }
+
     /* TERMINAL */
     .terminal-content { display: flex; flex-direction: column; }
     .terminal { flex: 1; overflow-y: auto; padding: 10px 14px; font-family: 'JetBrains Mono',monospace; font-size: 12.5px; min-height: 0; background: var(--bg-deep); line-height: 1.5; }
@@ -1216,6 +1383,20 @@ import { GitService } from './services/git.service';
     .ai-icon-btn { width: 28px; height: 28px; background: none; border: 1px solid transparent; border-radius: 6px; color: var(--text-dim); cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.15s; }
     .ai-icon-btn:hover { color: var(--text-secondary); background: var(--accent-hover-bg); border-color: var(--border-primary); }
     .ai-icon-btn.close:hover { color: var(--error); }
+    .ai-icon-btn.active { color: var(--accent); border-color: var(--accent); background: var(--accent-hover-bg); }
+
+    /* Conversation history dropdown */
+    .ai-convo-list { max-height: 280px; overflow-y: auto; border-bottom: 1px solid var(--border-primary); background: var(--bg-panel); }
+    .ai-convo-hdr { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; font-size: 10px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid var(--border-secondary); }
+    .ai-convo-count { background: var(--bg-code); padding: 1px 6px; border-radius: 4px; font-size: 9px; }
+    .ai-convo-empty { padding: 14px 12px; font-size: 11px; color: var(--text-dim); line-height: 1.4; }
+    .ai-convo-item { display: flex; flex-direction: column; gap: 2px; padding: 8px 12px; border-bottom: 1px solid var(--border-secondary); cursor: pointer; transition: background 0.12s; }
+    .ai-convo-item:hover { background: var(--accent-hover-bg); }
+    .ai-convo-item.active { background: var(--accent-hover-bg); border-left: 2px solid var(--accent); padding-left: 10px; }
+    .ai-convo-title { font-size: 12px; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .ai-convo-meta { display: flex; justify-content: space-between; align-items: center; font-size: 10px; color: var(--text-dim); }
+    .ai-convo-del { background: none; border: none; color: var(--text-dim); cursor: pointer; padding: 2px; display: flex; align-items: center; border-radius: 3px; }
+    .ai-convo-del:hover { color: var(--error); background: var(--accent-hover-bg); }
 
     /* Context bar */
     .ai-ctx { display: flex; align-items: center; gap: 6px; padding: 5px 12px; border-bottom: 1px solid var(--border-secondary); flex-shrink: 0; color: var(--text-dim); }
@@ -1224,6 +1405,20 @@ import { GitService } from './services/git.service';
 
     /* Chat */
     .ai-chat { flex: 1; overflow-y: auto; padding: 16px 14px; }
+
+    .load-older { display: flex; justify-content: center; padding: 6px 0 10px; }
+    .load-older-btn { background: var(--bg-panel); color: var(--text-muted); border: 1px solid var(--border-primary); border-radius: 6px; padding: 4px 12px; font-size: 11px; cursor: pointer; transition: all 0.15s; }
+    .load-older-btn:hover { color: var(--accent); border-color: var(--accent); background: var(--accent-hover-bg); }
+
+    /* Chat hydration skeleton — fixed height so real messages don't cause LCP reshuffles */
+    .chat-skeleton { display: flex; flex-direction: column; gap: 10px; padding: 12px 4px; }
+    .sk-row { display: flex; }
+    .sk-row.sk-user { justify-content: flex-end; }
+    .sk-row.sk-ai { justify-content: flex-start; }
+    .sk-bubble { width: 160px; height: 40px; border-radius: 12px; background: linear-gradient(90deg, var(--bg-panel), var(--bg-elevated), var(--bg-panel)); background-size: 200% 100%; animation: sk-shimmer 1.4s linear infinite; border: 1px solid var(--border-primary); }
+    .sk-bubble.wide { width: 220px; height: 60px; }
+    .sk-bubble.narrow { width: 100px; height: 32px; }
+    @keyframes sk-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
 
     /* Welcome */
     .ai-welcome { text-align: center; padding: 24px 8px; }
@@ -1372,19 +1567,31 @@ export class ScannerIdeComponent implements OnInit, AfterViewChecked {
   @ViewChild('terminalEl') terminalEl!: ElementRef<HTMLDivElement>;
   @ViewChild('folderPicker') folderPicker!: ElementRef<HTMLInputElement>;
 
-  darkMode = true;
-  @HostBinding('class.light-theme') get isLightTheme() { return !this.darkMode; }
+  get darkMode(): boolean { return this.themeService.isDark(); }
+  @HostBinding('class.light-theme') get isLightTheme() { return this.themeService.isLight(); }
 
   sidebarCollapsed = false;
   bottomPanelOpen = true;
   bottomPanelHeight = 220;
-  bottomTab: 'terminal' | 'problems' | 'debug' = 'terminal';
+  bottomTab: 'terminal' | 'problems' | 'debug' | 'search' | 'preview' = 'terminal';
+
+  // Search state
+  searchQuery = '';
+  searchCase = false;
+  searchRegex = false;
+  readonly searchRunning = signal(false);
+  readonly searchResults = signal<{ query: string; count: number; results: SearchHit[] }>({ query: '', count: 0, results: [] });
+
+  // Preview state
+  previewUrl = 'http://localhost:4200';
+  readonly previewSrc = signal<SafeResourceUrl | null>(null);
   editedCode = '';
   highlightedCode = '';
   terminalInput = '';
   ctxMenu = { show: false, x: 0, y: 0, node: null as FolderNode | null };
   cursorLine = 1;
   aiPanelOpen = true;
+  convoListOpen = false;
   aiIssue = '';
   editorDiffMode = false;
   editorDiffLines: { type: string; lineNum: number; text: string }[] = [];
@@ -1399,6 +1606,9 @@ export class ScannerIdeComponent implements OnInit, AfterViewChecked {
   showTrustDialog = false;
   pendingFolderName = '';
   folderScanning = false;
+  folderCollecting = false;
+  folderTruncated = false;
+  historyHydrating = false;
   showNewProjectDialog = false;
   newProjectName = '';
   newProjectPath = '';
@@ -1408,7 +1618,7 @@ export class ScannerIdeComponent implements OnInit, AfterViewChecked {
   remoteUrl = '';
   gitStatusMsg = '';
   gitStatusError = false;
-  private pendingFileArray: File[] = [];
+  pendingFileArray: File[] = [];
 
   report: Signal<ProjectReport | null>;
   selectedFile: Signal<ProjectFile | null>;
@@ -1427,6 +1637,9 @@ export class ScannerIdeComponent implements OnInit, AfterViewChecked {
     public ai: AIEngineService,
     public fs: FileSystemService,
     public git: GitService,
+    public themeService: ThemeService,
+    public searchSvc: SearchService,
+    private sanitizer: DomSanitizer,
     private cdr: ChangeDetectorRef
   ) {
     this.report = this.scanner.report;
@@ -1480,12 +1693,19 @@ export class ScannerIdeComponent implements OnInit, AfterViewChecked {
   }
 
   ngOnInit(): void {
-    // Load saved theme preference
-    const savedTheme = localStorage.getItem('ide-theme');
-    if (savedTheme === 'light') { this.darkMode = false; }
+    // Theme is already applied globally by ThemeService; no per-component load needed.
 
     // Attach copy-button listener immediately (works even before any chat message renders)
     this.ensureCopyListener();
+
+    // Restore persisted chat history AFTER the initial paint so LCP isn't blocked on
+    // the backend round-trip. Chat messages would otherwise become the LCP element.
+    this.historyHydrating = true;
+    setTimeout(() => {
+      this.ai.loadPersistedHistory()
+        .catch(() => {})
+        .finally(() => { this.historyHydrating = false; });
+    }, 0);
 
     if (!this.scanner.report()) {
       // No project loaded — sidebar shows "Open Folder" button automatically
@@ -1497,14 +1717,30 @@ export class ScannerIdeComponent implements OnInit, AfterViewChecked {
 
   goHome(): void { this.router.navigate(['/']); }
   goIssues(sev: string): void { this.router.navigate(['/scanner/issues', sev]); }
+  goDefects(): void { this.router.navigate(['/defects']); }
 
   toggleTheme(): void {
-    this.darkMode = !this.darkMode;
-    localStorage.setItem('ide-theme', this.darkMode ? 'dark' : 'light');
+    this.themeService.toggle();
   }
 
-  openFolderDialog(): void {
-    // Trigger native folder picker
+  async openFolderDialog(): Promise<void> {
+    // Prefer File System Access API when the browser supports it — gives real
+    // write access to the exact folder the user picked (no path guessing).
+    if (this.fs.supportsFsa()) {
+      this.folderCollecting = true;
+      try {
+        const picked = await this.fs.pickDirectory();
+        if (!picked) return; // user cancelled or denied permission
+        this.folderTruncated = picked.truncated;
+        this.pendingFolderName = picked.name;
+        this.pendingFileArray = picked.files;
+        this.showTrustDialog = true;
+      } finally {
+        this.folderCollecting = false;
+      }
+      return;
+    }
+    // Fallback: native <input webkitdirectory> (Firefox/Safari/older browsers).
     this.folderPicker?.nativeElement?.click();
   }
 
@@ -1556,7 +1792,9 @@ export class ScannerIdeComponent implements OnInit, AfterViewChecked {
       this.scanner.selectedFilePath.set(null);
       this.cdr.detectChanges();
 
-      // Try to find the project path on disk for terminal
+      // Always try to locate the project on disk so the terminal has a cwd to cd into
+      // (and `ng serve` / shell commands work). This is independent of file writes:
+      // writes use the FSA handle when present; the terminal uses this path.
       try {
         const foundPath = await this.runner.cdToProjectByName(folderName);
         if (foundPath) {
@@ -1955,9 +2193,14 @@ export class ScannerIdeComponent implements OnInit, AfterViewChecked {
   onEditorKeydown(event: KeyboardEvent): void {
     const textarea = event.target as HTMLTextAreaElement;
 
-    // Tab key -> insert 2 spaces
-    if (event.key === 'Tab') {
+    // Bracket auto-close — `{` → `{|}`, `(` → `(|)`, also for [, ", ', `
+    if (this.handleBracketAutoClose(event, textarea)) return;
+
+    // Tab key -> snippet expand OR insert 2 spaces
+    if (event.key === 'Tab' && !event.shiftKey) {
       event.preventDefault();
+      if (this.tryExpandSnippet(textarea)) return;
+      // Fallback: insert 2 spaces
       const start = textarea.selectionStart;
       const end = textarea.selectionEnd;
       const val = textarea.value;
@@ -1980,6 +2223,152 @@ export class ScannerIdeComponent implements OnInit, AfterViewChecked {
     }
 
     setTimeout(() => this.updateCursorPos(), 0);
+  }
+
+  // ===== SNIPPETS =====
+  // Map of trigger → template. `|` in the template marks where the cursor lands after expansion.
+  private snippets: Record<string, string> = {
+    'for':     'for (let i = 0; i < |.length; i++) {\n  \n}',
+    'forof':   'for (const item of |) {\n  \n}',
+    'foreach': '|.forEach((item, i) => {\n  \n});',
+    'if':      'if (|) {\n  \n}',
+    'ifelse':  'if (|) {\n  \n} else {\n  \n}',
+    'fn':      'function |() {\n  \n}',
+    'afn':     'const | = () => {\n  \n};',
+    'log':     'console.log(|);',
+    'tryc':    'try {\n  |\n} catch (err) {\n  console.error(err);\n}',
+    'async':   'async function |() {\n  \n}',
+    'await':   'const | = await ;',
+    'imp':     "import { | } from '';",
+    'exp':     'export const | = ;',
+    'cmp':     "import { Component } from '@angular/core';\n\n@Component({\n  selector: 'app-|',\n  standalone: true,\n  template: ``,\n})\nexport class Component { }",
+    'svc':     "import { Injectable } from '@angular/core';\n\n@Injectable({ providedIn: 'root' })\nexport class |Service { }",
+    'route':   "router.get('/|', (req, res) => {\n  res.json({});\n});",
+    'mdl':     'const | = new mongoose.Schema({\n  \n});',
+  };
+
+  private tryExpandSnippet(ta: HTMLTextAreaElement): boolean {
+    const pos = ta.selectionStart;
+    if (pos === ta.selectionEnd === false) return false;
+    const upToCursor = ta.value.substring(0, pos);
+    // Grab the last word-like token before the cursor
+    const wordMatch = upToCursor.match(/([A-Za-z_][A-Za-z0-9_]*)$/);
+    if (!wordMatch) return false;
+    const trigger = wordMatch[1];
+    const template = this.snippets[trigger];
+    if (!template) return false;
+
+    // Preserve the current line's indent when expanding multi-line snippets.
+    const lineStart = upToCursor.lastIndexOf('\n') + 1;
+    const indent = upToCursor.slice(lineStart).match(/^[ \t]*/)?.[0] || '';
+    const withIndent = template.replace(/\n/g, '\n' + indent);
+
+    const cursorOffset = withIndent.indexOf('|');
+    const expanded = cursorOffset >= 0 ? withIndent.replace('|', '') : withIndent;
+
+    const wordStart = pos - trigger.length;
+    const before = ta.value.substring(0, wordStart);
+    const after = ta.value.substring(pos);
+    ta.value = before + expanded + after;
+    const newPos = cursorOffset >= 0 ? wordStart + cursorOffset : wordStart + expanded.length;
+    ta.selectionStart = ta.selectionEnd = newPos;
+    this.editedCode = ta.value;
+    this.updateHighlight();
+    return true;
+  }
+
+  // ===== GLOBAL SEARCH =====
+  openSearchTab(): void {
+    this.bottomPanelOpen = true;
+    this.bottomTab = 'search';
+  }
+
+  async runSearch(): Promise<void> {
+    const q = this.searchQuery.trim();
+    if (!q) return;
+    const root = this.scanner.projectBasePath();
+    if (!root) {
+      this.runner.addLine('stderr', 'Search needs a disk path — re-open the folder so we can locate it on disk first.');
+      return;
+    }
+    this.searchRunning.set(true);
+    try {
+      const res = await this.searchSvc.search(q, root, { case: this.searchCase, regex: this.searchRegex });
+      if (!res) {
+        this.searchResults.set({ query: q, count: 0, results: [] });
+        return;
+      }
+      this.searchResults.set({ query: res.query, count: res.count, results: res.results });
+    } finally {
+      this.searchRunning.set(false);
+    }
+  }
+
+  /** Open the file from a search hit and scroll to the matched line. */
+  openSearchHit(hit: SearchHit): void {
+    // Translate backend relative path into the in-memory tree path.
+    const folderName = this.scanner.report()?.tree?.name || '';
+    const candidate = folderName ? folderName + '/' + hit.path.replace(/\\/g, '/') : hit.path.replace(/\\/g, '/');
+    const file = this.scanner.report()?.files.find(f => f.path === candidate || f.path.endsWith('/' + hit.path.replace(/\\/g, '/')));
+    if (!file) {
+      this.runner.addLine('stderr', `Couldn't locate "${hit.path}" in the open project.`);
+      return;
+    }
+    this.scanner.selectedFilePath.set(file.path);
+    setTimeout(() => this.scrollToLine(hit.line), 80);
+  }
+
+  // ===== LIVE PREVIEW =====
+  reloadPreview(): void {
+    const url = this.previewUrl.trim();
+    if (!url) { this.previewSrc.set(null); return; }
+    // Bust the iframe cache so "reload" actually refetches.
+    const withBust = url + (url.includes('?') ? '&' : '?') + '_t=' + Date.now();
+    this.previewSrc.set(this.sanitizer.bypassSecurityTrustResourceUrl(withBust));
+  }
+
+  // ===== BRACKET AUTO-CLOSE =====
+  private static BRACKET_PAIRS: Record<string, string> = {
+    '{': '}', '[': ']', '(': ')', '"': '"', "'": "'", '`': '`',
+  };
+
+  private handleBracketAutoClose(event: KeyboardEvent, ta: HTMLTextAreaElement): boolean {
+    // Don't trigger on IME composition or with modifiers (Ctrl/Cmd/Alt).
+    if (event.ctrlKey || event.metaKey || event.altKey || event.isComposing) return false;
+    const close = ScannerIdeComponent.BRACKET_PAIRS[event.key];
+    if (!close) return false;
+
+    const start = ta.selectionStart;
+    const end = ta.selectionEnd;
+    if (start == null || end == null) return false;
+    const val = ta.value;
+
+    // If the user typed a quote and the next char is already the same quote, just step over it.
+    if ((event.key === '"' || event.key === "'" || event.key === '`') && val[start] === event.key && start === end) {
+      event.preventDefault();
+      ta.selectionStart = ta.selectionEnd = start + 1;
+      return true;
+    }
+
+    // If there's a selection, wrap it: "foo" -> "(foo)".
+    if (start !== end) {
+      event.preventDefault();
+      const wrapped = event.key + val.substring(start, end) + close;
+      ta.value = val.substring(0, start) + wrapped + val.substring(end);
+      ta.selectionStart = start + 1;
+      ta.selectionEnd = end + 1;
+      this.editedCode = ta.value;
+      this.updateHighlight();
+      return true;
+    }
+
+    // No selection: insert pair and place cursor between.
+    event.preventDefault();
+    ta.value = val.substring(0, start) + event.key + close + val.substring(start);
+    ta.selectionStart = ta.selectionEnd = start + 1;
+    this.editedCode = ta.value;
+    this.updateHighlight();
+    return true;
   }
 
   updateCursorPos(): void {
@@ -2150,6 +2539,27 @@ export class ScannerIdeComponent implements OnInit, AfterViewChecked {
   // ===== AI CHAT =====
 
   @ViewChild('aiChatEl') aiChatEl!: ElementRef<HTMLDivElement>;
+
+  toggleConvoList(): void {
+    this.convoListOpen = !this.convoListOpen;
+    if (this.convoListOpen) this.ai.refreshConversations();
+  }
+
+  onNewConversation(): void {
+    this.ai.startNewConversation();
+    this.convoListOpen = false;
+  }
+
+  async onSwitchConversation(id: string): Promise<void> {
+    await this.ai.switchConversation(id);
+    this.convoListOpen = false;
+    setTimeout(() => this.scrollAiChat(), 50);
+  }
+
+  async onDeleteConversation(id: string, ev: Event): Promise<void> {
+    ev.stopPropagation();
+    await this.ai.deleteConversation(id);
+  }
 
   async aiSend(text?: string): Promise<void> {
     const input = text || this.aiIssue;
@@ -2444,6 +2854,7 @@ export class ScannerIdeComponent implements OnInit, AfterViewChecked {
 
   async applyArtifact(art: import('./services/ai-engine.service').Artifact): Promise<void> {
     const basePath = this.scanner.projectBasePath();
+    const canWriteDisk = this.fs.hasHandle() || (!!basePath && this.fs.connected());
 
     // If artifact has a file path in the project, edit it
     if (art.file) {
@@ -2453,45 +2864,26 @@ export class ScannerIdeComponent implements OnInit, AfterViewChecked {
         this.scanner.selectedFilePath.set(art.file);
         this.editedCode = art.content;
         this.updateHighlight(file.extension);
-        // Also write to disk if backend connected
-        if (basePath && this.fs.connected()) {
-          const fullPath = this.getNodeFullPath({ path: art.file, name: '', type: 'file', extension: '', children: [], issues: 0, expanded: false });
-          await this.fs.writeFile(fullPath, art.content);
-          this.runner.addLine('info', `Written to disk: ${fullPath}`);
+        if (canWriteDisk) {
+          const ok = await this.fs.saveProjectFile(art.file, art.content, basePath || undefined);
+          this.runner.addLine(ok ? 'info' : 'stderr', ok ? `Written to disk: ${art.file}` : `⚠️ Disk save failed: ${art.file}`);
+        } else {
+          this.runner.addLine('stderr', `Applied in memory only — re-open the folder with the picker to save to disk.`);
         }
-      } else if (basePath) {
-        // New file — create parent folders and file on disk
-        const fullPath = basePath + '\\' + art.title.replace(/\//g, '\\');
-        const parts = art.title.replace(/\\/g, '/').split('/');
-        if (parts.length > 1) {
-          for (let i = 1; i < parts.length; i++) {
-            const folderPath = basePath + '\\' + parts.slice(0, i).join('\\');
-            await this.fs.createFolder(folderPath);
-          }
-        }
-        await this.fs.writeFile(fullPath, art.content);
-        this.runner.addLine('info', `Created: ${fullPath}`);
+      } else if (canWriteDisk) {
+        // New file — saveProjectFile handles folder creation through the handle automatically.
+        const ok = await this.fs.saveProjectFile(art.file, art.content, basePath || undefined);
+        this.runner.addLine(ok ? 'info' : 'stderr', ok ? `Created: ${art.file}` : `⚠️ Disk save failed: ${art.file}`);
         // Add to IDE file tree so it appears in explorer
-        this.scanner.addFileToReport(fullPath, art.content);
-        // Show in editor
+        this.scanner.addFileToReport(art.file, art.content);
         this.editedCode = art.content;
         this.highlightedCode = this.highlighter.highlight(art.content, art.language) + '\n';
       }
-    } else if (basePath && art.title) {
-      // No file path but has a title — create as new file
-      const fullPath = basePath + '\\' + art.title.replace(/\//g, '\\');
-      // Create parent folders first
-      const parts = art.title.replace(/\\/g, '/').split('/');
-      if (parts.length > 1) {
-        for (let i = 1; i < parts.length; i++) {
-          const folderPath = basePath + '\\' + parts.slice(0, i).join('\\');
-          await this.fs.createFolder(folderPath);
-        }
-      }
-      await this.fs.writeFile(fullPath, art.content);
-      this.runner.addLine('info', `Created: ${fullPath}`);
-      // Add to IDE file tree so it appears in explorer
-      this.scanner.addFileToReport(fullPath, art.content);
+    } else if (canWriteDisk && art.title) {
+      // No file path but has a title — create as new file relative to project root.
+      const ok = await this.fs.saveProjectFile(art.title, art.content, basePath || undefined);
+      this.runner.addLine(ok ? 'info' : 'stderr', ok ? `Created: ${art.title}` : `⚠️ Disk save failed: ${art.title}`);
+      this.scanner.addFileToReport(art.title, art.content);
       this.editedCode = art.content;
       this.highlightedCode = this.highlighter.highlight(art.content, art.language) + '\n';
     }
@@ -2553,14 +2945,15 @@ export class ScannerIdeComponent implements OnInit, AfterViewChecked {
     // Clear pending diff (so reselecting the file won't re-open the diff view)
     if (filePath) this.scanner.acceptPendingDiff(filePath);
 
-    // Write to disk if connected (enhancement applied already wrote, but re-save in case user edited)
-    const basePath = this.scanner.projectBasePath();
-    if (basePath && this.fs.connected() && filePath) {
-      const file = this.scanner.report()?.files.find(f => f.path === filePath);
-      if (file) {
-        const fullPath = this.getNodeFullPath({ path: file.path, name: file.name, type: 'file', extension: file.extension, children: [], issues: 0, expanded: false });
-        await this.fs.writeFile(fullPath, this.editedCode);
-        this.runner.addLine('info', `Accepted & saved: ${fullPath}`);
+    // Write to disk: prefer FSA handle, fall back to backend absolute path.
+    if (filePath) {
+      const basePath = this.scanner.projectBasePath();
+      const canWriteDisk = this.fs.hasHandle() || (!!basePath && this.fs.connected());
+      if (canWriteDisk) {
+        const ok = await this.fs.saveProjectFile(filePath, this.editedCode, basePath || undefined);
+        this.runner.addLine(ok ? 'info' : 'stderr', ok ? `Accepted & saved: ${filePath}` : `Accept applied in memory but disk save failed: ${filePath}`);
+      } else {
+        this.runner.addLine('stderr', `Accepted in memory only — re-open the folder with the picker to enable disk writes.`);
       }
     }
     this.editorDiffFile = '';

@@ -57,6 +57,9 @@ export class ProjectScannerService {
   readonly selectedFilePath = signal<string | null>(null);
   readonly projectBasePath = signal<string>('');
 
+  /** Scanning progress: { current, total } — updated live during scanFiles. */
+  readonly scanProgress = signal<{ current: number; total: number }>({ current: 0, total: 0 });
+
   /**
    * Pending enhancement diffs: filePath → original content (before the enhancement was applied).
    * Used to show green/red diff highlights in the editor until the user accepts or undoes.
@@ -89,6 +92,12 @@ export class ProjectScannerService {
     'env', 'gitignore', 'dockerignore', 'editorconfig'
   ]);
 
+  /** Files matching these patterns are skipped entirely (path substring / suffix). */
+  private skipFileSuffixes = [
+    '.min.js', '.min.css', '.min.map', '.map', '.d.ts.map',
+    'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'composer.lock',
+  ];
+
   private skipFolders = new Set([
     'node_modules', '.git', '.angular', 'dist', 'build', 'coverage',
     '.next', '.nuxt', '__pycache__', '.vscode', '.idea', 'vendor',
@@ -114,26 +123,35 @@ export class ProjectScannerService {
     { pattern: /TODO|FIXME|HACK|XXX/, message: 'TODO/FIXME comment — needs attention', severity: 'info', rule: 'no-todo', languages: ['js', 'ts', 'jsx', 'tsx', 'py', 'java', 'html', 'css'] },
     { pattern: /\balert\s*\(/, message: 'alert() blocks the UI thread — use a modal/notification service', severity: 'warning', rule: 'no-alert', languages: ['js', 'ts', 'jsx', 'tsx'] },
     { pattern: /document\.(getElementById|querySelector|getElementsBy)/, message: 'Direct DOM manipulation — use framework methods instead', severity: 'warning', rule: 'no-direct-dom', languages: ['ts', 'tsx'] },
-    { pattern: /new Promise\(.*\n?.*async/, message: 'Unnecessary Promise wrapper in async context', severity: 'info', rule: 'no-async-promise', languages: ['js', 'ts'] },
+    // Single-line heuristic (was multi-line with `\n?` which is slower).
+    { pattern: /new Promise\(.*\basync\b/, message: 'Unnecessary Promise wrapper in async context', severity: 'info', rule: 'no-async-promise', languages: ['js', 'ts'] },
     { pattern: /setTimeout\s*\(\s*['"]/, message: 'String argument in setTimeout — use a function instead', severity: 'error', rule: 'no-implied-eval', languages: ['js', 'ts'] },
     { pattern: /catch\s*\(\s*\w+\s*\)\s*\{\s*\}/, message: 'Empty catch block — at least log the error', severity: 'warning', rule: 'no-empty-catch', languages: ['js', 'ts', 'jsx', 'tsx', 'java'] },
 
     // ===== ANGULAR SPECIFIC =====
     { pattern: /\.subscribe\s*\(/, message: 'Manual subscription — consider using async pipe or takeUntilDestroyed()', severity: 'info', rule: 'prefer-async-pipe', languages: ['ts'] },
-    { pattern: /\*ngFor(?![\s\S]{0,50}trackBy)/, message: '*ngFor without trackBy — hurts performance on large lists', severity: 'warning', rule: 'ngfor-track-by', languages: ['html', 'ts'] },
-    { pattern: /ngOnInit[\s\S]{0,200}\.subscribe/, message: 'Subscription in ngOnInit — make sure to unsubscribe in ngOnDestroy', severity: 'warning', rule: 'unsubscribe-on-destroy', languages: ['ts'] },
+    // Simple literal-contains: any *ngFor line that does NOT also contain "trackBy".
+    // Done as a simpler single-line regex — the old multi-line lookahead was a slow regex
+    // on large HTML files.
+    { pattern: /\*ngFor\b(?!.*trackBy)/, message: '*ngFor without trackBy — hurts performance on large lists', severity: 'warning', rule: 'ngfor-track-by', languages: ['html', 'ts'] },
+    // NOTE: the old multi-line [\s\S]{0,200} pattern could be O(n²) on large files.
+    // This line-level heuristic loses some accuracy but is constant-cost per line.
+    { pattern: /\bngOnInit\b.*\.subscribe\b/, message: 'Subscription in ngOnInit — make sure to unsubscribe in ngOnDestroy', severity: 'warning', rule: 'unsubscribe-on-destroy', languages: ['ts'] },
     { pattern: /\(click\)\s*=\s*"[^"]*\.[^"]*\.[^"]*"/, message: 'Complex expression in template event — move logic to component', severity: 'info', rule: 'no-complex-template-expression', languages: ['html'] },
     { pattern: /style\s*=\s*"[^"]{60,}"/, message: 'Long inline style — move to CSS file', severity: 'info', rule: 'no-long-inline-style', languages: ['html'] },
 
     // ===== NODE.JS / EXPRESS =====
-    { pattern: /app\.(get|post|put|delete|patch)\s*\([^,]+,\s*async[^{]*\{(?:(?!try).)*$/, message: 'Async route without try/catch — unhandled rejection can crash server', severity: 'error', rule: 'async-route-handler', languages: ['js', 'ts'] },
+    // NOTE: kept intentionally simple — the old negative-lookahead variant could backtrack
+    // catastrophically on certain content and hang analyzeFile for seconds.
+    { pattern: /app\.(get|post|put|delete|patch)\s*\([^,]+,\s*async\b(?![^{]*try)/, message: 'Async route without try/catch — unhandled rejection can crash server', severity: 'error', rule: 'async-route-handler', languages: ['js', 'ts'] },
     { pattern: /res\.(send|json|status)\s*\((?!.*return)/, message: 'Response sent without return — may send headers twice', severity: 'warning', rule: 'return-after-response', languages: ['js', 'ts'] },
     { pattern: /require\s*\(\s*['"]child_process['"]/, message: 'child_process usage — validate all inputs to prevent command injection', severity: 'error', rule: 'command-injection-risk', languages: ['js', 'ts'] },
     { pattern: /\.exec\s*\(\s*`/, message: 'Template literal in exec() — command injection risk', severity: 'error', rule: 'no-template-exec', languages: ['js', 'ts'] },
 
     // ===== MONGODB =====
     { pattern: /\.find\(\s*\{[^}]*\$where/, message: '$where operator can execute arbitrary JS — avoid it', severity: 'error', rule: 'no-where-operator', languages: ['js', 'ts'] },
-    { pattern: /mongoose\.connect\((?![\s\S]*try)/, message: 'Database connection without error handling', severity: 'warning', rule: 'db-error-handling', languages: ['js', 'ts'] },
+    // Line-level check (old pattern used [\s\S]* across whole file — expensive).
+    { pattern: /mongoose\.connect\((?!.*try)/, message: 'Database connection without error handling', severity: 'warning', rule: 'db-error-handling', languages: ['js', 'ts'] },
     { pattern: /findById\(req\.params/, message: 'findById without ID validation — CastError if format is wrong', severity: 'warning', rule: 'validate-object-id', languages: ['js', 'ts'] },
 
     // ===== CSS =====
@@ -155,7 +173,6 @@ export class ProjectScannerService {
   ];
 
   async scanFiles(fileList: FileList | File[]): Promise<ProjectReport> {
-    const files: ProjectFile[] = [];
     const fileArray = Array.isArray(fileList) ? fileList : Array.from(fileList);
 
     // Extract root folder name from first file's webkitRelativePath
@@ -165,35 +182,38 @@ export class ProjectScannerService {
       rootFolderName = firstPath.split('/')[0] || 'Project';
     }
 
-    const allTreeFiles: ProjectFile[] = []; // ALL files for tree (including unsupported)
+    // --- Pass 1: classify every file without I/O ---
+    // Separate readable (needs content + analysis) from shown-but-unread (binary / too large / skipped dir).
+    type Pending = {
+      file: File;
+      relativePath: string;
+      ext: string;
+      readable: boolean;
+      tooLarge: boolean;
+    };
+    const pending: Pending[] = [];
+    const staticTreeFiles: ProjectFile[] = [];
 
     for (const file of fileArray) {
       const relativePath = (file as any).webkitRelativePath || file.name;
       if (this.shouldSkip(relativePath)) continue;
-
       const ext = this.getExtension(file.name);
-      const canRead = this.supportedExtensions.has(ext) || ext === '';
-      const tooLarge = file.size > 500 * 1024;
+      const readable = this.supportedExtensions.has(ext) || ext === '';
+      // 200 KB is enough for any hand-written source file; anything bigger is almost
+      // always generated/minified/bundled and not worth pulling into memory.
+      const tooLarge = file.size > 200 * 1024;
 
-      if (canRead && !tooLarge) {
-        // Supported file — read content, analyze
-        try {
-          const content = await this.readFile(file);
-          const language = this.detectLanguage(ext);
-          const issues = this.analyzeFile(content, ext, relativePath);
-          const score = this.calculateFileScore(issues, content);
-          const pf: ProjectFile = { path: relativePath, name: file.name, extension: ext, size: file.size, content, language, issues, score };
-          files.push(pf);
-          allTreeFiles.push(pf);
-        } catch {}
+      if (readable && !tooLarge) {
+        pending.push({ file, relativePath, ext, readable, tooLarge });
       } else {
-        // Unsupported or too large — still show in tree, just no content
-        allTreeFiles.push({
+        staticTreeFiles.push({
           path: relativePath,
           name: file.name,
           extension: ext,
           size: file.size,
-          content: tooLarge ? `// File too large to display (${(file.size / 1024).toFixed(0)} KB)` : `// Binary or unsupported file type (.${ext})`,
+          content: tooLarge
+            ? `// File too large to display (${(file.size / 1024).toFixed(0)} KB)`
+            : `// Binary or unsupported file type (.${ext})`,
           language: this.detectLanguage(ext) || ext || 'binary',
           issues: [],
           score: 100,
@@ -201,12 +221,71 @@ export class ProjectScannerService {
       }
     }
 
+    this.scanProgress.set({ current: 0, total: pending.length });
+
+    // --- Pass 2: read + analyze in parallel batches ---
+    // FileReader is IO-bound — batching 16 at a time gives parallelism without any single
+    // stuck read blocking too many files. Each read also has its own timeout (see readFile).
+    const BATCH_SIZE = 16;
+    const readFiles: ProjectFile[] = [];
+    const skipped: ProjectFile[] = [];
+    let processed = 0;
+
+    for (let i = 0; i < pending.length; i += BATCH_SIZE) {
+      const batch = pending.slice(i, i + BATCH_SIZE);
+
+      // PHASE A: all reads in parallel (IO-bound, benefits from concurrency).
+      const reads = await Promise.allSettled(batch.map(p => this.readFile(p.file)));
+
+      // PHASE B: analyze sequentially with a yield between every file so the
+      // regex loop can't monopolize the main thread on pathological content.
+      for (let j = 0; j < reads.length; j++) {
+        const r = reads[j];
+        const p = batch[j];
+        if (r.status === 'fulfilled') {
+          try {
+            const language = this.detectLanguage(p.ext);
+            const issues = this.analyzeFile(r.value, p.ext, p.relativePath);
+            const score = this.calculateFileScore(issues, r.value);
+            readFiles.push({
+              path: p.relativePath, name: p.file.name, extension: p.ext,
+              size: p.file.size, content: r.value, language, issues, score,
+            });
+          } catch (err: any) {
+            // Analysis blew up on this file — keep the file, drop its issues.
+            console.warn('[scanFiles] analysis failed:', p.relativePath, err?.message || err);
+            readFiles.push({
+              path: p.relativePath, name: p.file.name, extension: p.ext,
+              size: p.file.size, content: r.value,
+              language: this.detectLanguage(p.ext), issues: [], score: 100,
+            });
+          }
+        } else {
+          skipped.push({
+            path: p.relativePath, name: p.file.name, extension: p.ext,
+            size: p.file.size,
+            content: `// Skipped during scan: ${r.reason?.message || 'unknown error'}`,
+            language: this.detectLanguage(p.ext) || p.ext || 'other',
+            issues: [], score: 100,
+          });
+        }
+        processed++;
+        // Update progress per file (not per batch) so the bar moves smoothly.
+        this.scanProgress.set({ current: processed, total: pending.length });
+        // Yield every 4 files — more than often enough to keep the UI alive,
+        // cheap enough to not hurt overall throughput.
+        if (processed % 4 === 0) await new Promise(res => setTimeout(res, 0));
+      }
+    }
+
+    const allTreeFiles: ProjectFile[] = [...readFiles, ...skipped, ...staticTreeFiles];
+
     // Build tree from ALL files (so folders with images/binaries still show)
     const tree = this.buildTree(allTreeFiles);
     tree.name = rootFolderName;
     tree.path = rootFolderName;
 
-    // Pass allTreeFiles so clicking any file in tree can open it
+    this.scanProgress.set({ current: 0, total: 0 });
     return this.buildReport(allTreeFiles, tree);
   }
 
@@ -287,15 +366,37 @@ export class ProjectScannerService {
 
   private shouldSkip(path: string): boolean {
     const parts = path.split('/');
-    // Only skip known junk folders — NOT dotfiles like .env, .gitignore
-    return parts.some(p => this.skipFolders.has(p));
+    if (parts.some(p => this.skipFolders.has(p))) return true;
+    // Skip noisy generated/minified files by filename match
+    const last = parts[parts.length - 1] || '';
+    for (const suffix of this.skipFileSuffixes) {
+      if (last.endsWith(suffix) || last === suffix) return true;
+    }
+    return false;
   }
 
-  private readFile(file: File): Promise<string> {
+  private readFile(file: File, timeoutMs = 4000): Promise<string> {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
-      reader.onload = () => resolve(reader.result as string);
-      reader.onerror = () => reject(reader.error);
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        try { reader.abort(); } catch {}
+        reject(new Error('readFile timeout'));
+      }, timeoutMs);
+      reader.onload = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(reader.result as string);
+      };
+      reader.onerror = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(reader.error);
+      };
       reader.readAsText(file);
     });
   }
@@ -318,43 +419,76 @@ export class ProjectScannerService {
     return map[ext] || 'Other';
   }
 
+  // Cache the filtered rule subset per extension. This is the single biggest win
+  // for analysis speed on large projects — the language check is done once per ext
+  // instead of once per line per rule.
+  private rulesByExt = new Map<string, typeof this.rules>();
+  private rulesForExt(ext: string): typeof this.rules {
+    const cached = this.rulesByExt.get(ext);
+    if (cached) return cached;
+    const filtered = this.rules.filter(r => r.languages.includes(ext));
+    this.rulesByExt.set(ext, filtered);
+    return filtered;
+  }
+
   private analyzeFile(content: string, ext: string, path: string): FileIssue[] {
     const issues: FileIssue[] = [];
     const lines = content.split('\n');
+    const applicable = this.rulesForExt(ext);
+
+    // If no rules apply to this extension, skip per-line work entirely.
+    if (applicable.length === 0 && !path.endsWith('.env')) return issues;
+
+    // Hard budget — if the regex loop drags past this, stop analyzing this file.
+    // Prevents one pathological file from hanging the whole scan.
+    const deadline = performance.now() + 500;
+    const overBudget = () => performance.now() > deadline;
 
     // Check for .env files with actual values
     if (path.endsWith('.env') && !path.endsWith('.env.example')) {
       const envPatterns = /(PASSWORD|SECRET|KEY|TOKEN)\s*=\s*\S+/i;
-      lines.forEach((line, i) => {
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
         if (envPatterns.test(line) && !line.trim().startsWith('#')) {
           issues.push({
-            line: i + 1,
-            severity: 'error',
+            line: i + 1, severity: 'error',
             message: 'Sensitive value in .env file — make sure this file is in .gitignore',
-            rule: 'env-secrets'
+            rule: 'env-secrets',
           });
         }
-      });
+      }
     }
 
-    // Apply rules per line
+    // Track rules that already flagged a given line so we don't double-count.
+    const hit = new Set<string>();
     for (let i = 0; i < lines.length; i++) {
+      // Bail early if we've burned through our wall-clock budget.
+      // Check every 64 lines (cheap) so the perf.now() call itself doesn't dominate.
+      if ((i & 63) === 0 && overBudget()) {
+        issues.push({
+          line: i + 1, severity: 'info',
+          message: `Analysis stopped early (budget exceeded) — file may contain pathological content.`,
+          rule: 'analysis-budget',
+        });
+        break;
+      }
       const line = lines[i];
+      const trimmed = line.trimStart();
       // Skip comment lines
-      if (line.trim().startsWith('//') || line.trim().startsWith('#') || line.trim().startsWith('*') || line.trim().startsWith('/*')) continue;
-
-      for (const rule of this.rules) {
-        if (!rule.languages.includes(ext)) continue;
+      const c0 = trimmed.charCodeAt(0);
+      if (c0 === 47 /* / */ || c0 === 35 /* # */ || c0 === 42 /* * */) continue;
+      const lineNum = i + 1;
+      for (const rule of applicable) {
+        const key = lineNum + '|' + rule.rule;
+        if (hit.has(key)) continue;
         if (rule.pattern.test(line)) {
-          // Avoid duplicating the same rule on the same line
-          if (!issues.some(iss => iss.line === i + 1 && iss.rule === rule.rule)) {
-            issues.push({
-              line: i + 1,
-              severity: rule.severity,
-              message: rule.message,
-              rule: rule.rule
-            });
-          }
+          hit.add(key);
+          issues.push({
+            line: lineNum,
+            severity: rule.severity,
+            message: rule.message,
+            rule: rule.rule,
+          });
         }
       }
     }

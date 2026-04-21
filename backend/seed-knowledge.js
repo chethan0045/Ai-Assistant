@@ -14,6 +14,12 @@ dns.setServers(['8.8.8.8', '8.8.4.4', '1.1.1.1']);
 const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://todoUser:chethan45@cluster0.etbmi2g.mongodb.net/ai-app?retryWrites=true&w=majority&appName=Cluster0';
 
 const { KnowledgeEntry, DirectAnswer } = require('./models/Knowledge');
+const { embed } = require('./services/embeddings');
+
+function buildEmbeddingText(entry) {
+  return [entry.title, entry.topic, entry.summary, (entry.keywords || []).join(' ')]
+    .filter(Boolean).join('\n');
+}
 
 // =====================================================================
 // KNOWLEDGE ENTRIES (topic, category, keywords, title, summary, details, examples, related)
@@ -1283,6 +1289,15 @@ async function seed() {
   await KnowledgeEntry.deleteMany({});
   await DirectAnswer.deleteMany({});
   console.log('Cleared existing data.');
+
+  // Compute embeddings for each entry (first run downloads the MiniLM model, ~25 MB)
+  console.log(`Computing embeddings for ${ENTRIES.length} entries...`);
+  for (let i = 0; i < ENTRIES.length; i++) {
+    ENTRIES[i].embedding = await embed(buildEmbeddingText(ENTRIES[i]));
+    if ((i + 1) % 10 === 0 || i === ENTRIES.length - 1) {
+      console.log(`  embedded ${i + 1}/${ENTRIES.length}`);
+    }
+  }
 
   // Insert entries
   const inserted = await KnowledgeEntry.insertMany(ENTRIES);
