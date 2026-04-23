@@ -49,3 +49,12 @@ coverage/
 # Misc
 *.tsbuildinfo
 *.local
+
+# MiniLM model weights — auto-downloaded on first run (~25 MB)
+backend/.models-cache/
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# Working-copy logo source (the usable copy lives in frontend/src/assets/)
+/AI LOGO.jpeg

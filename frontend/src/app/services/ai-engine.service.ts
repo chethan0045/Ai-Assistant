@@ -7,6 +7,7 @@ import { FileSystemService } from './file-system.service';
 import { KnowledgeApiService } from './knowledge-api.service';
 import { AlgorithmsService } from './algorithms.service';
 import { EnhancementsService } from './enhancements.service';
+import { CssRecipesService } from './css-recipes.service';
 import { LeetcodeService, LeetProblem } from './leetcode.service';
 import { ChatHistoryService, Conversation } from './chat-history.service';
 
@@ -92,6 +93,7 @@ export class AIEngineService {
   private kbApi = inject(KnowledgeApiService);
   private algos = inject(AlgorithmsService);
   private enhancements = inject(EnhancementsService);
+  private cssRecipes = inject(CssRecipesService);
   private leetcode = inject(LeetcodeService);
   private history = inject(ChatHistoryService);
   readonly conversations = signal<Conversation[]>([]);
@@ -300,8 +302,17 @@ export class AIEngineService {
       return this.cmdRunCode(input);
     }
 
+    // CSS recipe short-circuit — if the request names a specific recipe (dark theme,
+    // glassmorphism, rounded corners, etc.) AND a project is loaded, route straight
+    // to the enhancement flow so we don't fall into KB search for unrelated "glass"
+    // hits like "glassmorphism in design patterns".
+    const hasProject = !!(report?.files && report.files.length > 0);
+    if (hasProject && this.cssRecipes.detect(input) && !this.looksLikeExecutableCode(input)) {
+      return this.cmdEnhanceProject(input, report);
+    }
+
     // Enhancement request — detected via several patterns:
-    const isEnhancement = report?.files && report.files.length > 0 && (
+    const isEnhancement = hasProject && (
       /\b(add(\s|ing)?|enhance|improve|include|make it|make the|make this|modify|change|update|extend)\b.*\b(feature|functionality|support|so that|to do|to have|detection|dialog|option|ability)\b/i.test(cmd)
       || /\benhancement\b/i.test(cmd)
       || /make.*(game|app|code|project).*\b(happens?|work|detect|supports?)\b/i.test(cmd)
@@ -312,10 +323,11 @@ export class AIEngineService {
       || /\b(check\s*mate|checkmate|promoted?|promotion|game\s*(is\s*)?over|king.*captur|check.*given)/i.test(cmd)
       || /\bcode\s+(updat|chang|editi?).*\bnot\b/i.test(cmd)
       || /\btrain\s*(ai|module|model)|\bai\s+need\s+to\s+(edit|modify|update|fix|change)|\bedit\s+project\b/i.test(cmd)
-      // NEW — styling / appearance requests
-      || /\b(change|update|modify|customize|restyle|improve|redesign|change)\s+(the\s+)?.*\b(style|styling|look|appearance|color|colors|design|theme|ui|background|banner)\b/i.test(cmd)
-      || /\b(style|look|appearance|design|banner)\s+(of|for)\s+/i.test(cmd)
-      || /\bmake\s+.*\b(bigger|smaller|prettier|nicer|better|prominent|bold|colorful)\b/i.test(cmd)
+      // Styling / appearance requests — broadened to catch "add X effect", "apply Y theme", etc.
+      || /\b(add|apply|use|switch\s+to|try|set)\s+.{0,40}\b(style|styling|look|appearance|color|colors?|design|theme|ui|background|banner|effect|mode|palette)\b/i.test(cmd)
+      || /\b(change|update|modify|customize|restyle|improve|redesign)\s+(the\s+)?.*\b(style|styling|look|appearance|color|colors?|design|theme|ui|background|banner|effect|mode)\b/i.test(cmd)
+      || /\b(style|look|appearance|design|banner|theme)\s+(of|for)\s+/i.test(cmd)
+      || /\bmake\s+.*\b(bigger|smaller|prettier|nicer|better|prominent|bold|colorful|minimal|modern|flat|rounded|dark|light)\b/i.test(cmd)
       || /\b(change|update|restyle|customize)\s+(the\s+)?(check|checkmate|promotion|game\s*over|turn)\s+(notif|banner|alert|popup|dialog|message|display|style)/i.test(cmd)
     );
     if (isEnhancement) {
@@ -1396,9 +1408,43 @@ export class AIEngineService {
         };
       }
 
+      // Style-change fallback — CSS recipe system (offline, deterministic).
+      if (this.cssRecipes.isStyleIntent(input)) {
+        const recipe = this.cssRecipes.detect(input);
+        const currentPath = this.scanner?.selectedFilePath?.();
+        const picked = this.cssRecipes.pickTargetFile(report.files, currentPath || undefined);
+
+        if (!picked) {
+          return {
+            id: '', role: 'ai', timestamp: new Date(),
+            text: `## No Style File Found\n\nI can adjust CSS, but this project has no \`.css\`/\`.scss\` files and no components with an inline \`styles: [...]\` block. Open the file you'd like restyled (or add one), then try again.`,
+          };
+        }
+
+        // pickTargetFile returns a bare {path, content} — resolve to the full
+        // ProjectFile so applyCssRecipe has the metadata it needs.
+        const targetFile = report.files.find(f => f.path === picked.path);
+        if (!targetFile) {
+          return {
+            id: '', role: 'ai', timestamp: new Date(),
+            text: `## Target File Not Found\n\nPicked \`${picked.path}\` but it is no longer in the project tree. Try again.`,
+          };
+        }
+
+        if (!recipe) {
+          const recipeList = this.cssRecipes.list().map(r => `- **${r.name}** — ${r.description}`).join('\n');
+          return {
+            id: '', role: 'ai', timestamp: new Date(),
+            text: `## Which Style Change?\n\nI detected a style-change intent, but couldn't match it to a specific recipe.\n\n**Available style recipes:**\n${recipeList}\n\nTry: "make it dark", "use rounded corners", "glassmorphism", "flat minimal", "high contrast", "bigger buttons".\n\n*Target file selected:* \`${targetFile.path}\``,
+          };
+        }
+
+        return this.applyCssRecipe(recipe, targetFile, report);
+      }
+
       return {
         id: '', role: 'ai', timestamp: new Date(),
-        text: `## Enhancement Request Received\n\nI don't have a pre-built enhancement matching your request.\n\n**Available enhancements:**\n${this.enhancements.list().map(e => `- **${e.name}** — ${e.description}`).join('\n')}\n\nDescribe your change more specifically.`,
+        text: `## Enhancement Request Received\n\nI don't have a pre-built enhancement matching your request.\n\n**Available enhancements:**\n${this.enhancements.list().map(e => `- **${e.name}** — ${e.description}`).join('\n')}\n\n**Style recipes** (for CSS changes):\n${this.cssRecipes.list().map(r => `- **${r.name}** — ${r.description}`).join('\n')}\n\nDescribe your change more specifically.`,
       };
     }
 
@@ -1420,6 +1466,48 @@ export class AIEngineService {
   }
 
   /** Apply a matched enhancement to a specific file: update scanner + write to disk + format response */
+  private async applyCssRecipe(
+    recipe: import('./css-recipes.service').CssRecipe,
+    targetFile: ProjectFile,
+    report: ProjectReport,
+  ): Promise<ChatMessage> {
+    if (!this.scanner) {
+      return { id: '', role: 'ai', text: 'Scanner not available.', timestamp: new Date() };
+    }
+
+    const { content: newContent, note } = recipe.apply(targetFile.content);
+
+    // Diff highlight in editor + update in-memory tree.
+    this.scanner.markPendingDiff(targetFile.path, targetFile.content);
+    const updatedFile = { ...targetFile, content: newContent, size: newContent.length };
+    const allFiles = report.files.map(f => f.path === targetFile.path ? updatedFile : f);
+    const tree = this.scanner.buildTree(allFiles);
+    if (report.tree?.name) { tree.name = report.tree.name; tree.path = report.tree.path; }
+    this.scanner.report.set({ ...report, files: allFiles, tree } as any);
+    this.scanner.selectedFilePath.set(null);
+    setTimeout(() => this.scanner!.selectedFilePath.set(targetFile.path), 10);
+
+    // Persist to disk if the user has a file handle or a known project base path.
+    const basePath = this.scanner.projectBasePath();
+    const canWriteDisk = this.fs.hasHandle() || !!basePath;
+    let diskWritten = false;
+    let writeError = '';
+    if (canWriteDisk) {
+      diskWritten = await this.fs.saveProjectFile(targetFile.path, newContent, basePath || undefined);
+      if (!diskWritten) writeError = 'write call returned false';
+    }
+
+    const location = this.fs.hasHandle() ? this.fs.rootName() : basePath;
+    let text = `## Style Applied: ${recipe.name}\n\n${recipe.description}\n\n`;
+    text += `${note}\n\n**File:** \`${targetFile.path}\`\n`;
+    if (diskWritten) text += `\nWritten to disk (${location}).\n`;
+    else if (writeError) text += `\n_In-memory only — disk write failed: ${writeError}_\n`;
+    else text += `\n_In-memory only — no project path set for disk write._\n`;
+    text += `\nUse \`undo\` / \`revert\` on the editor's diff gutter to back out, or ask for a different recipe.`;
+
+    return { id: '', role: 'ai', text, timestamp: new Date() };
+  }
+
   private async applyEnhancement(match: import('./enhancements.service').Enhancement, targetFile: ProjectFile, report: ProjectReport): Promise<ChatMessage> {
     if (!this.scanner) {
       return { id: '', role: 'ai', text: 'Scanner not available.', timestamp: new Date() };

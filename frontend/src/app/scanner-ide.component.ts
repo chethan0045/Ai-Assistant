@@ -56,6 +56,7 @@ import { SearchService, SearchHit } from './services/search.service';
     <div class="ide-body">
       <!-- ACTIVITY BAR -->
       <div class="activity-bar">
+        <img class="ab-brand" src="assets/ai-logo-transparent.png" alt="AI Assistant" title="AI Assistant" />
         <button class="ab-icon" [class.active]="!sidebarCollapsed" (click)="sidebarCollapsed = !sidebarCollapsed" title="Explorer">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
         </button>
@@ -70,7 +71,17 @@ import { SearchService, SearchHit } from './services/search.service';
           <span class="ab-badge" *ngIf="git.status()?.files?.length">{{ git.status()!.files.length }}</span>
         </button>
         <button class="ab-icon ai-icon" [class.active]="aiPanelOpen" (click)="aiPanelOpen = !aiPanelOpen" title="AI Assistant">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 2a3 3 0 0 0-3 3v1a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 9H5a2 2 0 0 0-2 2v1a7 7 0 0 0 14 0v-1a2 2 0 0 0-2-2z"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="8" y1="22" x2="16" y2="22"/></svg>
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <!-- Sketched A-mascot outline with tail curl -->
+            <path d="M4 20 C 5 11 8 3.5 12 2.5 C 16 3.5 19 11 20 20 C 18.5 20 16.5 19 15 20 L 14 21.5 C 13 20.5 11.5 20 10.5 20.5"/>
+            <!-- Face bubble -->
+            <rect x="8.5" y="9.5" width="7" height="5" rx="2.3"/>
+            <!-- Smiling eyes -->
+            <path d="M10.3 12 Q 11 12.8 11.7 12"/>
+            <path d="M12.3 12 Q 13 12.8 13.7 12"/>
+            <!-- Sparkle (filled 4-point star) -->
+            <path d="M20.5 3.5 L 21 5.5 L 23 6 L 21 6.5 L 20.5 8.5 L 20 6.5 L 18 6 L 20 5.5 Z" fill="currentColor" stroke="none"/>
+          </svg>
         </button>
         <div class="ab-spacer"></div>
         <button class="ab-icon" [class.active]="bottomPanelOpen && bottomTab === 'problems'" (click)="bottomPanelOpen = true; bottomTab = 'problems'" title="Problems">
@@ -278,13 +289,13 @@ import { SearchService, SearchHit } from './services/search.service';
         <div class="editor-section" [style.flex]="bottomPanelOpen ? '1 1 60%' : '1 1 100%'">
           <!-- No project loaded yet -->
           <div class="no-file" *ngIf="!report()">
-            <div class="nf-icon">&#128193;</div>
+            <img class="nf-logo" src="assets/ai-logo.jpeg" alt="AI Assistant" />
             <p>Open a folder to start</p>
             <button class="open-folder-btn-center" (click)="openFolderDialog()">Open Folder</button>
           </div>
           <!-- Project loaded but no file selected -->
           <div class="no-file" *ngIf="!selectedFile() && report()">
-            <div class="nf-icon">&#128196;</div>
+            <img class="nf-logo" src="assets/ai-logo.jpeg" alt="AI Assistant" />
             <p>Select a file from the explorer to start editing</p>
             <div class="lang-chips" *ngIf="report()">
               <span class="lc" *ngFor="let l of report()!.languageBreakdown.slice(0,6)">{{ l.language }} ({{ l.count }})</span>
@@ -577,7 +588,7 @@ import { SearchService, SearchHit } from './services/search.service';
         <!-- Header -->
         <div class="ai-header">
           <div class="ai-hdr-left">
-            <div class="ai-logo">AI</div>
+            <img class="ai-logo" src="assets/ai-logo-transparent.png" alt="AI Assistant" />
             <span class="ai-title">AI Assistant</span>
             <span class="ai-badge on">Built-in</span>
           </div>
@@ -637,10 +648,7 @@ import { SearchService, SearchHit } from './services/search.service';
           <!-- Welcome -->
           <div class="ai-welcome" *ngIf="!historyHydrating && ai.messages().length === 0">
             <div class="ai-welcome-logo">
-              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="url(#aiGrad)" stroke-width="1.5">
-                <defs><linearGradient id="aiGrad" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#818cf8"/><stop offset="100%" stop-color="#c084fc"/></linearGradient></defs>
-                <path d="M12 2a3 3 0 0 0-3 3v1a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 9H5a2 2 0 0 0-2 2v1a7 7 0 0 0 14 0v-1a2 2 0 0 0-2-2z"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="8" y1="22" x2="16" y2="22"/>
-              </svg>
+              <img class="ai-welcome-img" src="assets/ai-logo-transparent.png" alt="AI Assistant" />
             </div>
             <h3>AI Code Assistant</h3>
             <p class="ai-welcome-sub">Analyze code, generate tests, fix bugs, build features — no API needed</p>
@@ -1018,6 +1026,20 @@ import { SearchService, SearchHit } from './services/search.service';
 
     .no-file { display: flex; flex-direction: column; align-items: center; justify-content: center; flex: 1; color: var(--text-faded); }
     .nf-icon { font-size: 56px; opacity: 0.3; margin-bottom: 12px; }
+    .nf-logo {
+      width: 260px; height: 260px; object-fit: contain;
+      opacity: 0.18;
+      margin-bottom: 24px;
+      border-radius: 32px;
+      filter: drop-shadow(0 0 48px rgba(99, 102, 241, 0.45))
+              drop-shadow(0 0 96px rgba(139, 92, 246, 0.25));
+      user-select: none; pointer-events: none;
+      animation: nfLogoFloat 6s ease-in-out infinite;
+    }
+    @keyframes nfLogoFloat {
+      0%, 100% { transform: translateY(0); opacity: 0.18; }
+      50%      { transform: translateY(-6px); opacity: 0.24; }
+    }
     .no-file p { font-size: 13px; margin-bottom: 20px; }
     .lang-chips { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; }
     .lc { font-size: 11px; padding: 3px 10px; background: var(--bg-elevated); border: 1px solid var(--border-tertiary); border-radius: 12px; color: var(--text-muted); }
@@ -1227,6 +1249,17 @@ import { SearchService, SearchHit } from './services/search.service';
       width: 44px; background: var(--bg-activity); border-right: 1px solid var(--border-gutter); display: flex;
       flex-direction: column; align-items: center; padding: 8px 0; gap: 4px; flex-shrink: 0;
     }
+    .ab-brand {
+      width: 32px; height: 32px; object-fit: contain; margin-bottom: 6px;
+      filter: drop-shadow(0 0 8px rgba(99, 102, 241, 0.5))
+              drop-shadow(0 0 16px rgba(139, 92, 246, 0.25));
+      user-select: none; pointer-events: none;
+      animation: abBrandGlow 4s ease-in-out infinite;
+    }
+    @keyframes abBrandGlow {
+      0%, 100% { filter: drop-shadow(0 0 8px rgba(99,102,241,0.5)) drop-shadow(0 0 16px rgba(139,92,246,0.25)); }
+      50%      { filter: drop-shadow(0 0 12px rgba(99,102,241,0.7)) drop-shadow(0 0 24px rgba(139,92,246,0.4)); }
+    }
     .ab-icon {
       width: 36px; height: 36px; display: flex; align-items: center; justify-content: center;
       background: none; border: none; color: var(--text-ghost); font-size: 17px; cursor: pointer;
@@ -1370,7 +1403,11 @@ import { SearchService, SearchHit } from './services/search.service';
     .ai-header { display: flex; align-items: center; padding: 0 10px; height: 40px; border-bottom: 1px solid var(--border-primary); flex-shrink: 0; background: var(--bg-panel); }
     .ai-hdr-left { display: flex; align-items: center; gap: 8px; }
     .ai-hdr-right { display: flex; align-items: center; gap: 4px; margin-left: auto; }
-    .ai-logo { width: 24px; height: 24px; background: linear-gradient(135deg,var(--accent-deep),var(--accent-purple)); border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 900; color: #fff; letter-spacing: -0.5px; }
+    .ai-logo {
+      width: 26px; height: 26px; object-fit: contain; border-radius: 6px;
+      filter: drop-shadow(0 0 6px rgba(99, 102, 241, 0.45));
+      user-select: none;
+    }
     .ai-title { font-size: 12px; font-weight: 600; color: var(--text-secondary); }
     .ai-badge { font-size: 8px; font-weight: 700; padding: 2px 7px; border-radius: 10px; letter-spacing: 0.3px; }
     .ai-badge.on { background: rgba(16,185,129,0.12); color: var(--success); border: 1px solid rgba(16,185,129,0.2); }
@@ -1422,7 +1459,19 @@ import { SearchService, SearchHit } from './services/search.service';
 
     /* Welcome */
     .ai-welcome { text-align: center; padding: 24px 8px; }
-    .ai-welcome-logo { margin-bottom: 12px; opacity: 0.7; }
+    .ai-welcome-logo { margin-bottom: 14px; display: flex; justify-content: center; }
+    .ai-welcome-img {
+      width: 96px; height: 96px; object-fit: contain;
+      opacity: 0.9;
+      filter: drop-shadow(0 0 18px rgba(99, 102, 241, 0.55))
+              drop-shadow(0 0 36px rgba(139, 92, 246, 0.3));
+      user-select: none; pointer-events: none;
+      animation: aiWelcomeFloat 5s ease-in-out infinite;
+    }
+    @keyframes aiWelcomeFloat {
+      0%, 100% { transform: translateY(0); filter: drop-shadow(0 0 18px rgba(99,102,241,0.55)) drop-shadow(0 0 36px rgba(139,92,246,0.3)); }
+      50%      { transform: translateY(-4px); filter: drop-shadow(0 0 26px rgba(99,102,241,0.75)) drop-shadow(0 0 52px rgba(139,92,246,0.45)); }
+    }
     .ai-welcome h3 { font-size: 18px; color: var(--text-primary); margin: 0 0 6px; font-weight: 700; }
     .ai-welcome-sub { font-size: 12px; color: var(--text-faded); margin: 0 0 20px; }
     .ai-status-card { display: inline-flex; align-items: center; gap: 8px; padding: 6px 14px; border-radius: 8px; font-size: 11px; margin-bottom: 20px; border: 1px solid var(--border-primary); background: var(--bg-panel); color: var(--text-faded); }

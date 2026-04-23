@@ -23,6 +23,7 @@ const DefectKnowledge = require('./models/DefectKnowledge');
 const Defect = require('./models/Defect');
 const ChatMessage = require('./models/ChatMessage');
 const LeetProblem = require('./models/LeetProblem');
+const ProjectBlueprint = require('./models/ProjectBlueprint');
 const { embed } = require('./services/embeddings');
 
 // Convert a stored regex pattern string into readable natural-language text.
@@ -98,6 +99,18 @@ const TARGETS = [
       (e.description || '').slice(0, 400),
     ].filter(Boolean).join('\n'),
     idLabel: e => `#${e.number} ${e.title}`,
+  },
+  {
+    name: 'blueprints',
+    label: 'ProjectBlueprint',
+    Model: ProjectBlueprint,
+    buildText: e => [
+      e.title,
+      e.description,
+      (e.stack || []).join(' '),
+      (e.keywords || []).join(' '),
+    ].filter(Boolean).join('\n'),
+    idLabel: e => e.slug,
   },
   {
     name: 'direct-answers',

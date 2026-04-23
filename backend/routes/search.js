@@ -9,6 +9,7 @@ const DefectKnowledge = require('../models/DefectKnowledge');
 const Defect = require('../models/Defect');
 const ChatMessage = require('../models/ChatMessage');
 const LeetProblem = require('../models/LeetProblem');
+const ProjectBlueprint = require('../models/ProjectBlueprint');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'ai-app-secret-key-2024';
 
@@ -158,7 +159,7 @@ router.get('/vector', async (req, res) => {
     const minScore = Number(req.query.minScore) || 0.3;
     const userId = extractUserId(req);
 
-    const requested = (req.query.collections || 'knowledge,defect-knowledge,defects,chat,leetcode,direct-answers')
+    const requested = (req.query.collections || 'knowledge,defect-knowledge,defects,chat,leetcode,direct-answers,blueprints')
       .toString()
       .split(',')
       .map(s => s.trim())
@@ -274,6 +275,27 @@ router.get('/vector', async (req, res) => {
           title: d.question || d.topic || 'Direct answer',
           snippet: (d.answer || '').slice(0, 240),
           metadata: { topic: d.topic, priority: d.priority },
+        }),
+      ));
+    }
+
+    if (want.has('blueprints')) {
+      jobs.push(searchCollection(
+        ProjectBlueprint,
+        {},
+        'slug title description stack keywords files instructions embedding',
+        d => ({
+          source: 'blueprints',
+          id: String(d._id),
+          title: d.title,
+          snippet: (d.description || '').slice(0, 240),
+          metadata: {
+            slug: d.slug,
+            stack: d.stack,
+            keywords: d.keywords,
+            fileCount: (d.files || []).length,
+            instructions: d.instructions,
+          },
         }),
       ));
     }

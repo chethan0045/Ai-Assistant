@@ -15,6 +15,13 @@ const leetProblemSchema = new mongoose.Schema({
   approach: { type: String, required: true },
   code: { type: String, required: true },
   tests: { type: String, default: '' },
+  // Additional language variants (C, C++, Python, etc.). The top-level `code`
+  // stays the JavaScript default for backward compat; this array holds the rest.
+  codes: [{
+    language: { type: String, required: true, lowercase: true, trim: true },
+    code: { type: String, required: true },
+    tests: { type: String, default: '' },
+  }],
   relatedNumbers: [{ type: Number }],
   // Vector representation for cross-collection semantic search. Built from
   // number/title/topics/keywords + description preview. Filled lazily by

@@ -1,7 +1,13 @@
 const express = require('express');
 const router = express.Router();
+const fs = require('fs');
+const path = require('path');
 const { KnowledgeEntry, DirectAnswer } = require('../models/Knowledge');
+const LeetProblem = require('../models/LeetProblem');
+const ProjectBlueprint = require('../models/ProjectBlueprint');
 const { embed, cosineSim } = require('../services/embeddings');
+const { CloudAIService } = require('../cloud-ai.service');
+const cloudAi = new CloudAIService();
 
 // ===== STOP WORDS =====
 const STOP_WORDS = new Set([
@@ -460,6 +466,489 @@ router.post('/generate-code', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// ===== GENERATE CODE (SEMANTIC) =====
+// Cross-collection vector search. Ranks hits from KnowledgeEntry AND LeetProblem
+// by cosine similarity against the same MiniLM query vector, then renders the
+// top hit in its native shape — patterns use summary/details/examples, algorithm
+// problems use approach/code/complexity/tests. Avoids needing a KnowledgeEntry
+// twin per LeetCode problem.
+router.post('/generate-code-semantic', async (req, res) => {
+  try {
+    const { request, k = 5, minScore = 0.3, language: rawLang } = req.body;
+    if (!request) return res.status(400).json({ error: 'request required' });
+
+    // Accept 'javascript' / 'js' / 'c' / 'cpp' / 'c++' / 'python' / 'py' etc.
+    const language = normalizeLanguage(rawLang) || detectLanguageInQuery(request);
+
+    const query = request.toString().trim();
+    const queryVec = await embed(query);
+
+    const [kbEntries, leetEntries] = await Promise.all([
+      KnowledgeEntry.find({ embedding: { $exists: true, $ne: [] } }),
+      LeetProblem.find({ embedding: { $exists: true, $ne: [] } }),
+    ]);
+
+    if (kbEntries.length === 0 && leetEntries.length === 0) {
+      return res.json({
+        code: '',
+        patterns_used: [],
+        message: 'No embedded entries found in KnowledgeEntry or LeetProblem. Run: node backfill-embeddings.js',
+      });
+    }
+
+    const kbScored = kbEntries.map(e => ({
+      source: 'knowledge', entry: e, score: cosineSim(queryVec, e.embedding),
+    }));
+    const leetScored = leetEntries.map(e => ({
+      source: 'leetcode', entry: e, score: cosineSim(queryVec, e.embedding),
+    }));
+
+    const ranked = [...kbScored, ...leetScored]
+      .filter(s => s.score >= Number(minScore))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, Number(k));
+
+    if (ranked.length === 0) {
+      const topMiss = [...kbScored, ...leetScored].sort((a, b) => b.score - a.score)[0];
+      return res.json({
+        code: '',
+        patterns_used: [],
+        topScore: topMiss?.score ?? 0,
+        message: 'No semantically similar entries found. Try rephrasing or lower minScore.',
+      });
+    }
+
+    const top = ranked[0];
+    let output;
+
+    if (top.source === 'leetcode') {
+      // Algorithm answer — render code/approach/complexity directly.
+      const p = top.entry;
+      const variant = pickCodeVariant(p, language);
+      output = `# #${p.number} ${p.title} (${p.difficulty})\n\n`;
+      if (p.topics?.length) output += `**Topics:** ${p.topics.join(', ')}\n\n`;
+      output += `${p.description}\n\n`;
+      output += `## Approach\n\n${p.approach}\n\n`;
+      output += `## Complexity\n\n- Time: ${p.complexity.time}\n- Space: ${p.complexity.space}\n\n`;
+      output += `## Code (${variant.language})\n\n\`\`\`${codeFence(variant.language)}\n${variant.code}\n\`\`\`\n\n`;
+      if (variant.tests) output += `## Tests\n\n\`\`\`${codeFence(variant.language)}\n${variant.tests}\n\`\`\`\n\n`;
+      if (variant.requested && variant.requested !== variant.language) {
+        output += `> Note: ${variant.requested} variant not yet seeded for this problem — showing ${variant.language}.\n\n`;
+      }
+      if (p.codes?.length) {
+        const langs = ['javascript', ...p.codes.map(c => c.language)];
+        output += `## Available Languages\n${Array.from(new Set(langs)).join(', ')}\n\n`;
+      }
+
+      const related = ranked.slice(1).filter(r => r.source === 'leetcode').slice(0, 3);
+      if (related.length) {
+        output += `## Related Problems\n`;
+        for (const r of related) {
+          output += `- #${r.entry.number} ${r.entry.title} (${r.entry.difficulty})\n`;
+        }
+      }
+    } else {
+      // KB-pattern answer — render summary/details/examples, fold in security baselines.
+      const primary = top.entry;
+      const supporting = ranked.slice(1, 5)
+        .filter(r => r.source === 'knowledge')
+        .map(r => r.entry);
+
+      output = `# ${primary.title}\n\n${primary.summary}\n\n## Implementation\n\n${primary.details}\n\n`;
+      if (primary.examples?.length) {
+        output += `## Examples\n\n${primary.examples.join('\n\n')}\n\n`;
+      }
+      if (supporting.length) {
+        output += `## Supporting Patterns\n\n`;
+        for (const s of supporting) {
+          output += `### ${s.title}\n${s.summary}\n\n`;
+          const codeMatch = s.details.match(/```[\s\S]+?```/);
+          if (codeMatch) output += codeMatch[0] + '\n\n';
+        }
+      }
+      output += `## Security & Error Handling Checklist\n`;
+      output += `- Input validation on all user inputs\n`;
+      output += `- Try/catch wrapping async operations\n`;
+      output += `- Proper HTTP status codes (400/401/403/404/409/500)\n`;
+      output += `- JWT tokens for authentication (not sessions)\n`;
+      output += `- bcrypt for password hashing (cost factor 10)\n`;
+      output += `- CORS configured for frontend origin\n`;
+      output += `- Never expose error stack traces in production\n`;
+      output += `- Environment variables for secrets (never hardcoded)\n`;
+    }
+
+    res.json({
+      code: output,
+      source: 'vector',
+      primary_source: top.source,
+      primary_pattern: top.source === 'leetcode'
+        ? `leetcode-${top.entry.number}`
+        : top.entry.topic,
+      topScore: Number(top.score.toFixed(3)),
+      patterns_used: ranked.map(r => ({
+        source: r.source,
+        topic: r.source === 'leetcode' ? `leetcode-${r.entry.number}` : r.entry.topic,
+        title: r.source === 'leetcode'
+          ? `#${r.entry.number} ${r.entry.title}`
+          : r.entry.title,
+        category: r.source === 'leetcode' ? r.entry.difficulty : r.entry.category,
+        score: Number(r.score.toFixed(3)),
+      })),
+    });
+  } catch (err) {
+    console.error('Generate code (semantic) error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ===== GENERATE CODE (RAG + LLM) =====
+// Full pipeline: retrieve similar problems by vector similarity, build a context
+// block, hand to DeepSeek to synthesize NEW code. Falls back to pure retrieval
+// when no API key is set so the offline path still works.
+//
+// Body: { request, k = 4, minScore = 0.25, language = 'javascript' }
+// Response: { generated, retrieved, fallback?, model }
+router.post('/generate-code-rag', async (req, res) => {
+  try {
+    const {
+      request,
+      k = 4,
+      minScore = 0.25,
+      language: rawLang,
+    } = req.body;
+    if (!request) return res.status(400).json({ error: 'request required' });
+
+    const query = request.toString().trim();
+    const language = normalizeLanguage(rawLang) || detectLanguageInQuery(query) || 'javascript';
+    const queryVec = await embed(query);
+
+    const [kbEntries, leetEntries] = await Promise.all([
+      KnowledgeEntry.find({ embedding: { $exists: true, $ne: [] } }),
+      LeetProblem.find({ embedding: { $exists: true, $ne: [] } }),
+    ]);
+
+    const scored = [
+      ...kbEntries.map(e => ({ source: 'knowledge', entry: e, score: cosineSim(queryVec, e.embedding) })),
+      ...leetEntries.map(e => ({ source: 'leetcode', entry: e, score: cosineSim(queryVec, e.embedding) })),
+    ].filter(s => s.score >= Number(minScore))
+     .sort((a, b) => b.score - a.score)
+     .slice(0, Number(k));
+
+    const retrieved = scored.map(s => ({
+      source: s.source,
+      title: s.source === 'leetcode' ? `#${s.entry.number} ${s.entry.title}` : s.entry.title,
+      score: Number(s.score.toFixed(3)),
+      category: s.source === 'leetcode' ? s.entry.difficulty : s.entry.category,
+    }));
+
+    // --- Offline fallback path ---
+    if (!cloudAi.getStatus().ready) {
+      return res.json({
+        generated: '',
+        retrieved,
+        fallback: 'no_api_key',
+        message: 'DeepSeek API key not set. Set DEEPSEEK_API_KEY env var or POST /api/ai/set-key to enable generation. Until then, use /generate-code-semantic for pure retrieval.',
+      });
+    }
+
+    // --- Build context block from retrieved entries ---
+    // Use the variant matching the requested language when available; otherwise
+    // include JS as the reference (the LLM is told to translate).
+    const contextBlocks = scored.map(s => {
+      if (s.source === 'leetcode') {
+        const p = s.entry;
+        const variant = pickCodeVariant(p, language);
+        return `### Reference: #${p.number} ${p.title} (${p.difficulty})
+Topics: ${(p.topics || []).join(', ')}
+Approach: ${p.approach}
+Complexity: time ${p.complexity.time}, space ${p.complexity.space}
+Reference code (${variant.language}):
+\`\`\`${codeFence(variant.language)}
+${variant.code}
+\`\`\``;
+      }
+      const e = s.entry;
+      return `### Reference: ${e.title}
+Category: ${e.category}
+Summary: ${e.summary}
+Details: ${e.details.slice(0, 1200)}`;
+    }).join('\n\n');
+
+    const systemPrompt = `You are an expert software engineer. Use the reference material below as inspiration — adapt patterns, don't copy blindly. Produce clean, correct, idiomatic ${language} code.
+
+Output exactly these sections in markdown:
+1. **Approach** — 2-4 sentence explanation
+2. **Complexity** — time and space
+3. **Code** — one fenced \`\`\`${language} block with a complete, runnable solution
+4. **Tests** — a second fenced block with example calls + expected outputs
+
+Do not invent problem details that weren't asked for. If the reference is not relevant, ignore it.`;
+
+    const userPrompt = contextBlocks
+      ? `Reference material from our knowledge base:\n\n${contextBlocks}\n\n---\n\nNow solve this request:\n"${query}"`
+      : `Solve this request:\n"${query}"`;
+
+    let generated;
+    try {
+      generated = await cloudAi.complete(
+        [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+        { temperature: 0.2, maxTokens: 2048 },
+      );
+    } catch (err) {
+      return res.status(502).json({
+        error: 'LLM call failed',
+        detail: err.message,
+        retrieved,
+      });
+    }
+
+    res.json({
+      generated,
+      retrieved,
+      model: cloudAi.model,
+      source: 'rag+llm',
+      topScore: scored[0]?.score ? Number(scored[0].score.toFixed(3)) : 0,
+    });
+  } catch (err) {
+    console.error('Generate code (RAG) error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ===== SEARCH BLUEPRINTS (vector retrieval only, no file writing) =====
+// Use this to preview which blueprint generate-project would pick, or to browse
+// blueprints ranked by how well they match a free-form description.
+router.get('/search-blueprints', async (req, res) => {
+  try {
+    const q = (req.query.q || '').toString().trim();
+    if (!q) return res.status(400).json({ error: 'q parameter required' });
+    const k = Math.min(Math.max(Number(req.query.k) || 5, 1), 20);
+    const minScore = Number(req.query.minScore) || 0.2;
+    const includeFiles = req.query.includeFiles === '1' || req.query.includeFiles === 'true';
+
+    const queryVec = await embed(q);
+    const all = await ProjectBlueprint.find({ embedding: { $exists: true, $ne: [] } });
+    if (all.length === 0) {
+      return res.json({ query: q, count: 0, results: [], message: 'No embedded blueprints. Run seed-project-blueprints.js + backfill-embeddings.js.' });
+    }
+    const scored = all
+      .map(b => ({ b, score: cosineSim(queryVec, b.embedding) }))
+      .filter(s => s.score >= minScore)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, k);
+
+    res.json({
+      query: q,
+      count: scored.length,
+      results: scored.map(s => ({
+        slug: s.b.slug,
+        title: s.b.title,
+        description: s.b.description,
+        stack: s.b.stack,
+        keywords: s.b.keywords,
+        fileCount: (s.b.files || []).length,
+        files: includeFiles ? s.b.files.map(f => ({ path: f.path, bytes: f.content?.length || 0 })) : undefined,
+        instructions: s.b.instructions,
+        score: Number(s.score.toFixed(3)),
+      })),
+    });
+  } catch (err) {
+    console.error('Search blueprints error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ===== GENERATE PROJECT =====
+// Retrieve the best-matching ProjectBlueprint, then write files under
+// targetPath/projectName. When DEEPSEEK_API_KEY is set, the blueprint is used
+// as context and DeepSeek is asked to emit the full file set tailored to the
+// request; otherwise the blueprint's skeleton files are written verbatim.
+//
+// Body: { description, projectName, targetPath, useLLM? = true, k? = 3 }
+router.post('/generate-project', async (req, res) => {
+  try {
+    const { description, projectName, targetPath, useLLM = true, k = 3 } = req.body;
+    if (!description) return res.status(400).json({ error: 'description required' });
+    if (!projectName || !/^[\w\-. ]{1,80}$/.test(projectName)) {
+      return res.status(400).json({ error: 'projectName must be 1-80 safe chars (alnum, _-.space)' });
+    }
+    if (!targetPath) return res.status(400).json({ error: 'targetPath required' });
+
+    // Validate target directory.
+    let stat;
+    try { stat = await fs.promises.stat(targetPath); }
+    catch { return res.status(400).json({ error: 'targetPath does not exist' }); }
+    if (!stat.isDirectory()) return res.status(400).json({ error: 'targetPath must be a directory' });
+
+    const projectPath = path.join(targetPath, projectName);
+    // Refuse to overwrite existing non-empty dir.
+    if (fs.existsSync(projectPath)) {
+      const entries = await fs.promises.readdir(projectPath);
+      if (entries.length > 0) return res.status(409).json({ error: 'Target path already exists and is not empty' });
+    } else {
+      await fs.promises.mkdir(projectPath, { recursive: true });
+    }
+
+    // Retrieve top-k blueprints.
+    const queryVec = await embed(description);
+    const all = await ProjectBlueprint.find({ embedding: { $exists: true, $ne: [] } });
+    if (all.length === 0) {
+      return res.status(503).json({
+        error: 'No blueprints with embeddings. Run: node seed-project-blueprints.js && node backfill-embeddings.js',
+      });
+    }
+    const scored = all.map(b => ({ b, score: cosineSim(queryVec, b.embedding) }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, Number(k));
+
+    const top = scored[0];
+    if (!top || top.score < 0.2) {
+      return res.json({
+        success: false,
+        message: 'No blueprint close enough to the request.',
+        topScore: top?.score ?? 0,
+        candidates: scored.map(s => ({ slug: s.b.slug, title: s.b.title, score: s.score })),
+      });
+    }
+
+    // Choose file set: LLM-expanded or blueprint skeletons.
+    let files = top.b.files;
+    let usedLLM = false;
+    let llmError = null;
+
+    if (useLLM && cloudAi.getStatus().ready) {
+      const blueprintContext = top.b.files.map(f => `FILE: ${f.path}\n\`\`\`\n${f.content}\n\`\`\``).join('\n\n');
+      const sys = `You are an expert software engineer. Given a project blueprint and a user description, produce a complete, runnable multi-file project.
+
+Output ONLY valid JSON (no markdown fences, no prose) with this exact shape:
+{"files":[{"path":"relative/path","content":"full file contents"}, ...]}
+
+Rules:
+- Paths are relative, POSIX-style (forward slashes).
+- No absolute paths, no path traversal (no "..").
+- Include every file the project needs to run (package.json, server/entry files, configs).
+- Match the stack of the blueprint unless the description overrides it.
+- Keep dependency versions close to those in the blueprint's package.json.`;
+      const user = `Project name: ${projectName}
+User request: ${description}
+
+Blueprint: ${top.b.title}
+Stack: ${(top.b.stack || []).join(', ')}
+Description: ${top.b.description}
+
+Blueprint skeleton files (adapt as needed):
+${blueprintContext}`;
+
+      try {
+        const raw = await cloudAi.complete(
+          [{ role: 'system', content: sys }, { role: 'user', content: user }],
+          { temperature: 0.25, maxTokens: 8192 },
+        );
+        // Strip accidental markdown fences.
+        const jsonStr = raw.replace(/^\s*```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
+        const parsed = JSON.parse(jsonStr);
+        if (Array.isArray(parsed.files) && parsed.files.length > 0) {
+          files = parsed.files;
+          usedLLM = true;
+        }
+      } catch (err) {
+        llmError = err.message;
+        // Fall through — we'll write the blueprint skeletons instead.
+      }
+    }
+
+    // Write every file, guarding against path traversal.
+    const written = [];
+    const skipped = [];
+    for (const f of files) {
+      if (!f || typeof f.path !== 'string' || typeof f.content !== 'string') {
+        skipped.push({ reason: 'bad shape', file: f?.path });
+        continue;
+      }
+      const rel = f.path.replace(/\\/g, '/').replace(/^\/+/, '');
+      if (rel.includes('..') || path.isAbsolute(rel)) {
+        skipped.push({ reason: 'unsafe path', file: f.path });
+        continue;
+      }
+      const full = path.join(projectPath, rel);
+      if (!full.startsWith(projectPath)) {
+        skipped.push({ reason: 'escape attempt', file: f.path });
+        continue;
+      }
+      await fs.promises.mkdir(path.dirname(full), { recursive: true });
+      await fs.promises.writeFile(full, f.content, 'utf-8');
+      written.push(rel);
+    }
+
+    res.json({
+      success: true,
+      projectPath,
+      filesWritten: written,
+      skipped,
+      usedLLM,
+      llmError,
+      blueprint: {
+        slug: top.b.slug,
+        title: top.b.title,
+        score: Number(top.score.toFixed(3)),
+        instructions: top.b.instructions,
+      },
+      candidates: scored.map(s => ({ slug: s.b.slug, title: s.b.title, score: Number(s.score.toFixed(3)) })),
+    });
+  } catch (err) {
+    console.error('Generate project error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ----- Language helpers ---------------------------------------------------
+const LANG_ALIASES = {
+  js: 'javascript', javascript: 'javascript', node: 'javascript', nodejs: 'javascript',
+  ts: 'typescript', typescript: 'typescript',
+  c: 'c',
+  cpp: 'cpp', 'c++': 'cpp', cxx: 'cpp', 'cplusplus': 'cpp',
+  py: 'python', python: 'python',
+  java: 'java',
+};
+function normalizeLanguage(raw) {
+  if (!raw) return null;
+  const k = raw.toString().toLowerCase().trim().replace(/\s+/g, '');
+  return LANG_ALIASES[k] || null;
+}
+function detectLanguageInQuery(q) {
+  const s = q.toLowerCase();
+  if (/\bc\+\+|\bcpp\b|\bcplusplus/.test(s)) return 'cpp';
+  if (/\bin\s+c\b|\bc\s+code\b|\b\.c\b/.test(s)) return 'c';
+  if (/\bjavascript\b|\bjs\b|\bnode\b/.test(s)) return 'javascript';
+  if (/\btypescript\b|\bts\b/.test(s)) return 'typescript';
+  if (/\bpython\b|\bpy\b/.test(s)) return 'python';
+  if (/\bjava\b/.test(s)) return 'java';
+  return null;
+}
+// Pick the best code variant for a problem given the requested language.
+// Returns { language, code, tests, requested } — `requested` is the caller's
+// asked-for language even if we fell back (so the caller can tell the user).
+function pickCodeVariant(problem, requestedLang) {
+  const req = requestedLang || 'javascript';
+  // Requested JS (or no preference) — use the top-level code field.
+  if (req === 'javascript') {
+    return { language: 'javascript', code: problem.code, tests: problem.tests || '', requested: req };
+  }
+  // Look in codes array for an exact match.
+  const hit = (problem.codes || []).find(c => c.language === req);
+  if (hit) return { language: hit.language, code: hit.code, tests: hit.tests || '', requested: req };
+  // Fall back to JavaScript so the user still gets an answer.
+  return { language: 'javascript', code: problem.code, tests: problem.tests || '', requested: req };
+}
+// Map internal language key to markdown code-fence identifier.
+function codeFence(lang) {
+  const map = { javascript: 'javascript', typescript: 'typescript', c: 'c', cpp: 'cpp', python: 'python', java: 'java' };
+  return map[lang] || lang;
+}
 
 // Detect which additional patterns should be included based on intent
 function detectCompanions(query) {

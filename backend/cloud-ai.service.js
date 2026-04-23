@@ -120,6 +120,57 @@ class CloudAIService {
     });
   }
 
+  /**
+   * Non-streaming chat completion. Returns the full assistant message as a string.
+   * Used by JSON endpoints (e.g. RAG code generation) where we assemble one answer
+   * rather than streaming tokens to the client.
+   */
+  async complete(messages, opts = {}) {
+    if (!this.apiKey) {
+      const err = new Error('No DeepSeek API key configured');
+      err.code = 'NO_API_KEY';
+      throw err;
+    }
+    const body = JSON.stringify({
+      model: opts.model || this.model,
+      messages,
+      stream: false,
+      temperature: opts.temperature ?? 0.3,
+      max_tokens: opts.maxTokens ?? 2048,
+    });
+    return new Promise((resolve, reject) => {
+      const req = https.request({
+        hostname: 'api.deepseek.com',
+        path: '/chat/completions',
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${this.apiKey}`,
+          'Content-Length': Buffer.byteLength(body),
+        },
+      }, (apiRes) => {
+        let raw = '';
+        apiRes.on('data', c => raw += c);
+        apiRes.on('end', () => {
+          if (apiRes.statusCode !== 200) {
+            let msg = `DeepSeek API error ${apiRes.statusCode}`;
+            try { msg = JSON.parse(raw).error?.message || msg; } catch {}
+            return reject(new Error(msg));
+          }
+          try {
+            const parsed = JSON.parse(raw);
+            resolve(parsed.choices?.[0]?.message?.content || '');
+          } catch (err) {
+            reject(new Error('Invalid JSON from DeepSeek: ' + err.message));
+          }
+        });
+      });
+      req.on('error', reject);
+      req.write(body);
+      req.end();
+    });
+  }
+
   buildMessages(userInput, projectContext, conversationHistory, currentFile) {
     const messages = [];
     let sys = SYSTEM_PROMPT;

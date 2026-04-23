@@ -42,12 +42,16 @@ cd backend
 npm install
 cp .env.example .env
 # Edit .env: MONGO_URI, JWT_SECRET, MAIL_USER, MAIL_PASS
+# Optional: DEEPSEEK_API_KEY — unlocks /api/knowledge/generate-code-rag
 
-# Start Node server only
+# One command: Node + optional Python AI module in the same terminal
 npm start
 
-# Or start Node + Python AI module together (Ctrl-C kills both)
-npm run dev
+# Just the Node server (skip Python even if installed)
+npm run start:node
+
+# First-time on a fresh DB: seed everything, backfill embeddings, then start
+npm run start:fresh
 ```
 Runs at `http://localhost:4100` (auto-fallback to 4101+ if taken). Python AI module, when started, runs on port 5100 and is proxied through the Node server.
 
@@ -57,13 +61,16 @@ cd frontend
 npm install
 npm start
 ```
-Open `http://localhost:4200`.
+Open `http://localhost:4500`.
 
 ### Seed the knowledge bases (first run)
 ```bash
 cd backend
 
-# One-shot: runs every seed script in order
+# One-shot: seeds everything + backfills MiniLM embeddings
+npm run setup
+
+# Or just seeds (no embedding backfill)
 npm run seed:all
 
 # Or individually
@@ -71,22 +78,52 @@ node seed-knowledge.js
 node seed-fullstack.js
 node seed-angular-concepts.js
 node seed-production-patterns.js
-node seed-ai-concepts.js          # RAG / embeddings / LLM explainers (8 entries + 5 direct answers)
-node seed-defect-knowledge.js     # defect RAG corpus (20 entries)
-node seed-leetcode-1.js           # LeetCode problem bank (1, 2, 3, 87, 112, 273)
+node seed-ai-concepts.js            # RAG / embeddings / LLM explainers
+node seed-defect-knowledge.js       # defect RAG corpus (20 entries)
+node seed-leetcode-1.js             # original problem bank (1, 2, 3, 87, 112, 273)
 node seed-leetcode-2.js
 node seed-leetcode-3.js
+node seed-leetcode-13.js            # #13 Roman to Integer
 node seed-leetcode-87.js
 node seed-leetcode-112.js
 node seed-leetcode-273.js
+node seed-algorithms-bulk.js        # 30 classic problems across every major category
+node seed-algorithms-multilang.js   # C + C++ variants for 16 core problems
+node seed-project-blueprints.js     # 5 project blueprints for AI project generator
 ```
 
 ### One-off maintenance scripts
 ```bash
 cd backend
 node analyze-defects-now.js      # Re-run RAG on every defect that lacks suggestions
-node backfill-embeddings.js      # Universal: computes missing embeddings across KnowledgeEntry, DefectKnowledge, Defect, ChatMessage, LeetProblem
+node backfill-embeddings.js      # Universal: computes missing embeddings across KnowledgeEntry, DefectKnowledge, Defect, ChatMessage, LeetProblem, DirectAnswer
 node purge-defects.js            # Delete every defect (keeps DefectKnowledge)
+```
+
+## Multi-language code generation
+
+`LeetProblem` has a `codes: [{ language, code, tests }]` array alongside the JavaScript `code` default. Currently seeded with C + C++ variants for 16 core problems (Two Sum, Binary Search, Kadane's Maximum Subarray, Coin Change, LIS, etc.). The semantic and RAG endpoints accept a `language` body param and auto-detect it from the query text.
+
+```bash
+# JavaScript (default)
+curl -X POST http://localhost:4100/api/knowledge/generate-code-semantic \
+  -H "Content-Type: application/json" \
+  -d '{"request":"binary search"}'
+
+# C++
+curl -X POST http://localhost:4100/api/knowledge/generate-code-semantic \
+  -H "Content-Type: application/json" \
+  -d '{"request":"binary search","language":"cpp"}'
+
+# Language inferred from the query text
+curl -X POST http://localhost:4100/api/knowledge/generate-code-semantic \
+  -H "Content-Type: application/json" \
+  -d '{"request":"coin change in c"}'
+
+# Full RAG + LLM generation (needs DEEPSEEK_API_KEY)
+curl -X POST http://localhost:4100/api/knowledge/generate-code-rag \
+  -H "Content-Type: application/json" \
+  -d '{"request":"rotate a matrix 90 degrees in c++","language":"cpp"}'
 ```
 
 ## Endpoints
@@ -100,8 +137,17 @@ node purge-defects.js            # Delete every defect (keeps DefectKnowledge)
 
 ### Knowledge (`/api/knowledge`)
 - `GET /stats`, `GET /entries?category=...`, `GET /entries/:topic`, `GET /search?q=...`
-- `POST /answer` — smart Q&A
-- `POST /generate-code` — code assembly from KB
+- `GET /search-vector?q=...` — cosine-similarity retrieval over `KnowledgeEntry` (MiniLM)
+- `POST /answer` — smart Q&A (regex → semantic → keyword → text search)
+- `POST /rag-answer` — top-k retrieval + composed answer
+- `POST /generate-code` — keyword-based code assembly from KB
+- `POST /generate-code-semantic` — vector retrieval across `KnowledgeEntry` + `LeetProblem`; accepts `language` (`javascript`/`c`/`cpp`/`python`/`java`) and falls back to JS when a requested variant isn't seeded
+- `POST /generate-code-rag` — retrieval + DeepSeek LLM generation (needs `DEEPSEEK_API_KEY`); falls back to retrieval-only when no key is set
+- `POST /generate-project` — retrieves best-matching `ProjectBlueprint` and writes a full multi-file project under `targetPath/projectName`. With `DEEPSEEK_API_KEY`, DeepSeek expands the blueprint into tailored files; without, the blueprint skeleton is written verbatim. Body: `{ description, projectName, targetPath, useLLM?, k? }`
+
+### Search (`/api/search`)
+- `GET /?q=...&root=...` — recursive file grep
+- `GET /vector?q=...` — cross-collection semantic search over `KnowledgeEntry`, `DefectKnowledge`, `Defect`, `ChatMessage`, `LeetProblem`, `DirectAnswer`
 
 ### Defects (`/api/defects`)
 - `POST /log` — record a runtime error (unauthed; used by the frontend global error handler)
@@ -117,9 +163,6 @@ node purge-defects.js            # Delete every defect (keeps DefectKnowledge)
 
 ### Chat (`/api/chat`)
 - CRUD over conversations + persisted message history
-
-### Search (`/api/search`)
-- `GET /?q=...` — cross-collection full-text search
 
 ### Git (`/api/git`)
 - `GET /status`, `GET /log`, `GET /diff`, `POST /branch`, etc.

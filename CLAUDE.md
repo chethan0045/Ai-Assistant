@@ -8,11 +8,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 cd backend
 npm install
-npm start                          # just the Node server (terminal-server.js); auto-falls back to 4101+ if 4100 taken
-npm run dev                        # Node + Python AI module in one terminal (colored prefixes, Ctrl-C kills both)
+npm start                          # one command: Node + optional Python AI module in the same terminal (colored prefixes, Ctrl-C kills both). Auto-falls back to 4101+ if 4100 taken.
+npm run start:node                 # just the Node server (skip Python even if installed)
+npm run dev                        # alias of `npm start`
+npm run setup                      # seed:all + backfill-embeddings (safe to re-run; all upserts)
+npm run start:fresh                # setup + start — first-time convenience on an empty DB
 npm run seed:all                   # runs every seed-*.js script in order (one-shot)
 ```
-Requires `.env` with `MONGO_URI`, `JWT_SECRET`, `MAIL_USER`, `MAIL_PASS`. A fallback Mongo URI is hardcoded in `terminal-server.js`; the server stays up even if Mongo fails to connect (auth + persistence features degrade, everything else still works).
+Requires `.env` with `MONGO_URI`, `JWT_SECRET`, `MAIL_USER`, `MAIL_PASS`. Optional `DEEPSEEK_API_KEY` unlocks `/api/knowledge/generate-code-rag` (RAG + LLM code generation); without it, that endpoint returns retrieval-only results with a fallback message so offline-first still holds. A fallback Mongo URI is hardcoded in `terminal-server.js`; the server stays up even if Mongo fails to connect (auth + persistence features degrade, everything else still works).
 
 ### Frontend (Angular 17, port 4200)
 ```bash
@@ -33,12 +36,16 @@ node seed-angular-concepts.js
 node seed-production-patterns.js
 node seed-ai-concepts.js           # RAG / embeddings / LLM / prompt-engineering explainers (8 entries)
 node seed-defect-knowledge.js      # 20-entry defect RAG corpus (required for defect AI suggestions)
-node seed-leetcode-1.js            # problem bank (1, 2, 3, 87, 112, 273)
+node seed-leetcode-1.js            # original problem bank (1, 2, 3, 87, 112, 273)
 node seed-leetcode-2.js
 node seed-leetcode-3.js
+node seed-leetcode-13.js           # #13 Roman to Integer
 node seed-leetcode-87.js
 node seed-leetcode-112.js
 node seed-leetcode-273.js
+node seed-algorithms-bulk.js       # 30 classic problems covering arrays, DP, trees, graphs, backtracking, sorting, stack, linked list, binary search
+node seed-algorithms-multilang.js  # sets the `codes` array (C + C++ variants) on 16 core problems. Run after all LeetProblem seeds.
+node seed-project-blueprints.js    # 5 ProjectBlueprint entries used by the AI project generator
 ```
 
 ### One-off maintenance scripts (`backend/`)
@@ -78,6 +85,20 @@ Everything rendered at `/defects` comes from the unified Defect collection. The 
 Frontend services in `frontend/src/app/services/` are the API surface the IDE uses:
 - `ai-engine.service.ts` (~3000 lines) — **offline-first** AI. Answers from local `knowledge-base.ts` and patterns before hitting the network. This is the primary "thinking" path.
 - `knowledge-api.service.ts` — hits MongoDB-backed `/api/knowledge/*`.
+
+Three code-generation tiers live on `/api/knowledge/*`, in increasing capability:
+1. `POST /generate-code` — keyword-matched KB pattern assembly. Offline.
+2. `POST /generate-code-semantic` — cosine-similarity retrieval across `KnowledgeEntry` + `LeetProblem`. Accepts `language` (js/c/cpp/python/java) and auto-detects it from the query text. Uses `pickCodeVariant()` to return the right language from `LeetProblem.codes[]` with a JS fallback. Offline.
+3. `POST /generate-code-rag` — same retrieval, but builds a context block and asks DeepSeek to synthesize new code in the requested language. Needs `DEEPSEEK_API_KEY`. Falls back to retrieval-only response when the key is missing so the offline contract holds.
+
+The `LeetProblem` schema has a `codes: [{ language, code, tests }]` array alongside the top-level `code` field (the JavaScript default). `seed-algorithms-multilang.js` sets this field for 16 core problems with C + C++; extending to more languages means appending to that seed file and re-running it (embeddings don't need to be rebuilt — they're derived from title/topics/description, not from code).
+
+### AI project generator (new)
+`POST /api/knowledge/generate-project` retrieves the best-matching `ProjectBlueprint` by cosine similarity on description, then writes a full multi-file project under `targetPath/projectName`. With `DEEPSEEK_API_KEY`, DeepSeek expands the blueprint into tailored files; without, blueprint skeletons are written verbatim (offline-first contract). Body: `{ description, projectName, targetPath, useLLM?, k? }`. Security: rejects unsafe paths (absolute, `..` traversal, escapes outside projectPath) and refuses to overwrite non-empty directories.
+
+`ProjectBlueprint` model (`backend/models/ProjectBlueprint.js`): `{ slug, title, description, stack, keywords, files: [{ path, content }], instructions, embedding }`. Seeded blueprints are small by design — the LLM expansion path doesn't need complete templates, and the offline path writes them as-is for a functional scaffold. Extend by appending entries to `seed-project-blueprints.js` and re-running `seed-project-blueprints.js && backfill-embeddings.js` (embeddings are built from title + description + stack + keywords).
+
+The frontend exposes this as an "AI Generate Project" button in the empty-state panel of `scanner-ide.component.ts` (next to "+ New Empty Project"). The dialog collects description + project name + target disk path, POSTs to the endpoint, and shows the written-files path on success.
 - `defects.service.ts` — `/api/defects/*`. Log, analyze-without-persisting, sync-scan, list, stats, RAG, reclassify.
 - `enhancements.service.ts`, `code-generator.service.ts`, `improver.service.ts`, `project-scanner.service.ts`, `project-templates.service.ts`, `algorithms.service.ts`, `debugger.service.ts`, `code-runner.service.ts`, `file-system.service.ts`, `git.service.ts`, `leetcode.service.ts`, `chat-history.service.ts`, `search.service.ts`, `theme.service.ts`, `syntax-highlight.service.ts` — each owns a narrow capability. The IDE component orchestrates them; **do not duplicate their logic inline**.
 

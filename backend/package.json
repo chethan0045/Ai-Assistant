@@ -2,12 +2,15 @@
   "name": "code-assistant-backend",
   "version": "1.0.0",
   "scripts": {
-    "start": "node terminal-server.js",
+    "start": "node start-all.js",
+    "start:node": "node terminal-server.js",
     "dev": "node start-all.js",
+    "setup": "npm run seed:all && node backfill-embeddings.js",
+    "start:fresh": "npm run setup && npm start",
     "test": "node --test tests/test-defect-rules.js tests/test-defect-fixer.js tests/test-defects-api.js",
     "test:unit": "node --test tests/test-defect-rules.js tests/test-defect-fixer.js",
     "test:api": "node --test tests/test-defects-api.js",
-    "seed:all": "node seed-knowledge.js && node seed-fullstack.js && node seed-angular-concepts.js && node seed-production-patterns.js && node seed-ai-concepts.js && node seed-defect-knowledge.js && node seed-leetcode-1.js && node seed-leetcode-2.js && node seed-leetcode-3.js && node seed-leetcode-87.js && node seed-leetcode-112.js && node seed-leetcode-273.js"
+    "seed:all": "node seed-knowledge.js && node seed-fullstack.js && node seed-angular-concepts.js && node seed-production-patterns.js && node seed-ai-concepts.js && node seed-defect-knowledge.js && node seed-leetcode-1.js && node seed-leetcode-2.js && node seed-leetcode-3.js && node seed-leetcode-13.js && node seed-leetcode-87.js && node seed-leetcode-112.js && node seed-leetcode-273.js && node seed-algorithms-bulk.js && node seed-algorithms-multilang.js && node seed-project-blueprints.js"
   },
   "dependencies": {
     "@xenova/transformers": "^2.17.2",
