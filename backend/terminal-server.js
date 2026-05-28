@@ -68,7 +68,7 @@ const { errorCapture } = require('./middleware/errorCapture');
 app.use(errorCapture());
 
 // Serve built frontend
-const distPath = path.join(__dirname, '..', 'frontend', 'dist');
+const distPath = path.join(__dirname, '..', 'frontend', 'dist', 'browser');
 app.use(express.static(distPath));
 app.get('*', (req, res) => {
   res.sendFile(path.join(distPath, 'index.html'));
@@ -1512,4 +1512,4 @@ function startServer(port) {
     }
   });
 }
-startServer(4100);
+startServer(parseInt(process.env.PORT, 10) || 4100);

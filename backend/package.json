@@ -12,6 +12,9 @@
     "test:api": "node --test tests/test-defects-api.js",
     "seed:all": "node seed-knowledge.js && node seed-fullstack.js && node seed-angular-concepts.js && node seed-production-patterns.js && node seed-ai-concepts.js && node seed-defect-knowledge.js && node seed-leetcode-1.js && node seed-leetcode-2.js && node seed-leetcode-3.js && node seed-leetcode-13.js && node seed-leetcode-87.js && node seed-leetcode-112.js && node seed-leetcode-273.js && node seed-algorithms-bulk.js && node seed-algorithms-multilang.js && node seed-project-blueprints.js"
   },
+  "overrides": {
+    "protobufjs": "^7.6.1"
+  },
   "dependencies": {
     "@xenova/transformers": "^2.17.2",
     "bcryptjs": "^3.0.3",
