@@ -67,6 +67,13 @@ app.use('/api/scaffold', scaffoldRoutes);
 const { errorCapture } = require('./middleware/errorCapture');
 app.use(errorCapture());
 
+// Serve built frontend
+const distPath = path.join(__dirname, '..', 'frontend', 'dist');
+app.use(express.static(distPath));
+app.get('*', (req, res) => {
+  res.sendFile(path.join(distPath, 'index.html'));
+});
+
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
