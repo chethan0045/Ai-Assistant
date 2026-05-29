@@ -67,10 +67,22 @@ app.use('/api/scaffold', scaffoldRoutes);
 const { errorCapture } = require('./middleware/errorCapture');
 app.use(errorCapture());
 
-// Serve built frontend
+// Serve built frontend.
+// index.html must NEVER be cached — it points to content-hashed JS/CSS bundles,
+// and a stale index.html makes the browser load an old app (or 404 on deleted
+// chunks). The hashed assets themselves are immutable, so cache them hard.
 const distPath = path.join(__dirname, '..', 'frontend', 'dist', 'browser');
-app.use(express.static(distPath));
+app.use(express.static(distPath, {
+  setHeaders: (res, filePath) => {
+    if (filePath.endsWith('index.html')) {
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    } else {
+      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    }
+  },
+}));
 app.get('*', (req, res) => {
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
   res.sendFile(path.join(distPath, 'index.html'));
 });
 
