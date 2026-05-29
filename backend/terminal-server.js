@@ -73,6 +73,7 @@ app.use(errorCapture());
 // chunks). The hashed assets themselves are immutable, so cache them hard.
 const distPath = path.join(__dirname, '..', 'frontend', 'dist', 'browser');
 app.use(express.static(distPath, {
+  index: false, // don't auto-serve index.html; the SPA fallback (registered last) handles it
   setHeaders: (res, filePath) => {
     if (filePath.endsWith('index.html')) {
       res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
@@ -81,10 +82,9 @@ app.use(express.static(distPath, {
     }
   },
 }));
-app.get('*', (req, res) => {
-  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-  res.sendFile(path.join(distPath, 'index.html'));
-});
+// NOTE: the SPA fallback (app.get('*')) is registered at the very END of this
+// file, AFTER all /api routes — otherwise it shadows every API GET route
+// defined below (they'd return index.html instead of running).
 
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
@@ -1496,11 +1496,15 @@ app.get('/api/find-folder', (req, res) => {
   // Priority 2: breadth-first search under the home dir (where projects usually
   // live), up to 5 levels deep, skipping heavy/system dirs. Returns the
   // shallowest match, which avoids accidentally picking a nested duplicate.
-  const SKIP = new Set(['node_modules', '.git', '.cache', 'AppData', '.vscode', '.idea', 'dist', 'build', '$Recycle.Bin']);
-  const bfsFind = (root, maxDepth) => {
+  const SKIP = new Set(['node_modules', '.git', '.cache', 'AppData', '.vscode', '.idea', 'dist', 'build', '$Recycle.Bin', 'Windows', 'Program Files', 'Program Files (x86)', 'ProgramData', 'System Volume Information']);
+  // Bounded BFS: returns the shallowest match, skips heavy/system dirs, and caps
+  // how many directories it visits so it can't run away scanning a whole drive.
+  const bfsFind = (root, maxDepth, budget) => {
+    let visited = 0;
     let queue = [{ dir: root, depth: 0 }];
-    while (queue.length) {
+    while (queue.length && visited < budget) {
       const { dir, depth } = queue.shift();
+      visited++;
       let entries;
       try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { continue; }
       for (const e of entries) {
@@ -1518,33 +1522,26 @@ app.get('/api/find-folder', (req, res) => {
     return null;
   };
 
-  const homeMatch = bfsFind(home, 5);
+  // Search the home dir first (most projects), then each drive root.
+  const homeMatch = bfsFind(home, 6, 20000);
   if (homeMatch) return res.json({ path: homeMatch });
-
-  // Priority 3: shallow search (2 levels) across other drive roots.
   for (const letter of 'CDEFGH') {
-    const drive = letter + ':\\';
-    try {
-      const l1 = fs.readdirSync(drive, { withFileTypes: true });
-      for (const d1 of l1) {
-        if (!d1.isDirectory()) continue;
-        if (d1.name.toLowerCase() === lower) {
-          return res.json({ path: path.join(drive, d1.name) });
-        }
-        try {
-          const l2path = path.join(drive, d1.name);
-          const l2 = fs.readdirSync(l2path, { withFileTypes: true });
-          for (const d2 of l2) {
-            if (d2.isDirectory() && d2.name.toLowerCase() === lower) {
-              return res.json({ path: path.join(l2path, d2.name) });
-            }
-          }
-        } catch {}
-      }
-    } catch {}
+    const driveMatch = bfsFind(letter + ':\\', 5, 20000);
+    if (driveMatch) return res.json({ path: driveMatch });
   }
 
   res.json({ path: null });
+});
+
+// SPA fallback — MUST be the last route. Any GET that didn't match an API route
+// or a static file returns index.html so Angular client-side routing works.
+// Unknown /api/* GETs return JSON 404 instead of the SPA shell.
+app.get('*', (req, res) => {
+  if (req.path.startsWith('/api/')) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.sendFile(path.join(distPath, 'index.html'));
 });
 
 function startServer(port) {
