@@ -48,12 +48,17 @@ export class ChatHistoryService {
   constructor() { this.detect(); }
 
   private async detect(): Promise<void> {
+    const host = window.location.hostname;
+    if (host !== 'localhost' && host !== '127.0.0.1') {
+      this.baseUrl = '/api/chat'; this.detected = true; return;
+    }
     for (let p = 4100; p <= 4106; p++) {
       try {
         const r = await fetch(`http://localhost:${p}/api/health`);
         if (r.ok) { this.baseUrl = `http://localhost:${p}/api/chat`; this.detected = true; return; }
       } catch {}
     }
+    this.baseUrl = '/api/chat'; this.detected = true;
   }
 
   private async ensureUrl(): Promise<string> {

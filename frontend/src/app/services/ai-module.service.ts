@@ -112,6 +112,11 @@ export class AIModuleService {
   // ===== BACKEND DETECTION =====
 
   private async detectBackend(): Promise<void> {
+    const host = window.location.hostname;
+    if (host !== 'localhost' && host !== '127.0.0.1') {
+      this.baseUrl = '/api/ai-module';
+      return;
+    }
     for (let port = 4100; port <= 4106; port++) {
       try {
         const res = await fetch(`http://localhost:${port}/api/health`);

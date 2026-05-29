@@ -38,6 +38,10 @@ export class FileSystemService {
   }
 
   private async detectPort(): Promise<void> {
+    const host = window.location.hostname;
+    if (host !== 'localhost' && host !== '127.0.0.1') {
+      this.baseUrl = ''; this.connected.set(true); return;
+    }
     for (let p = 4100; p < 4106; p++) {
       try {
         const res = await fetch(`http://localhost:${p}/api/health`, { signal: AbortSignal.timeout(500) });

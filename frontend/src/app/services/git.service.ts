@@ -34,12 +34,17 @@ export class GitService {
   constructor() { this.detect(); }
 
   private async detect(): Promise<void> {
+    const host = window.location.hostname;
+    if (host !== 'localhost' && host !== '127.0.0.1') {
+      this.baseUrl = '/api/git'; return;
+    }
     for (let p = 4100; p <= 4106; p++) {
       try {
         const r = await fetch(`http://localhost:${p}/api/health`);
         if (r.ok) { this.baseUrl = `http://localhost:${p}/api/git`; return; }
       } catch {}
     }
+    this.baseUrl = '/api/git';
   }
 
   private async ensureUrl() {

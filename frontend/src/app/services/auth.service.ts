@@ -28,12 +28,23 @@ export class AuthService {
   }
 
   private async detectBackend(): Promise<void> {
+    // In production (deployed), the backend serves the SPA from the same origin,
+    // so API calls are relative. Only probe localhost ports during local dev,
+    // where the Angular dev server (4200) and backend (4100+) are split.
+    const host = window.location.hostname;
+    const isLocalDev = host === 'localhost' || host === '127.0.0.1';
+    if (!isLocalDev) {
+      this.baseUrl = '/api/auth';
+      return;
+    }
     for (let port = 4100; port <= 4106; port++) {
       try {
         const res = await fetch(`http://localhost:${port}/api/health`);
         if (res.ok) { this.baseUrl = `http://localhost:${port}/api/auth`; return; }
       } catch {}
     }
+    // Fallback to same-origin if no local backend was found.
+    this.baseUrl = '/api/auth';
   }
 
   private loadFromStorage(): void {
