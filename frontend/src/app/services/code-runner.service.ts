@@ -72,7 +72,29 @@ export class CodeRunnerService {
 
   // ===== PORT DETECTION =====
 
+  /** True when running against a local dev backend (split ports). */
+  private get isLocalHost(): boolean {
+    const h = window.location.hostname;
+    return h === 'localhost' || h === '127.0.0.1';
+  }
+
+  /** HTTP base for REST calls — empty string (same origin) when deployed. */
+  private httpBase(): string {
+    return this.isLocalHost ? `http://localhost:${this.detectedPort}` : '';
+  }
+
+  /** WebSocket URL for the shell — same origin (wss) when deployed. */
+  private wsUrl(): string {
+    if (this.isLocalHost) return `ws://localhost:${this.detectedPort}`;
+    const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    return `${proto}://${window.location.host}`;
+  }
+
   private async detectPort(): Promise<void> {
+    // Deployed: backend HTTP + WebSocket share this origin, so skip port probing.
+    // detectedPort = -1 is a sentinel meaning "use same origin" (still truthy,
+    // so the connect guards below proceed instead of showing JS-only mode).
+    if (!this.isLocalHost) { this.detectedPort = -1; return; }
     for (let p = this.basePort; p < this.basePort + 6; p++) {
       try {
         const res = await fetch(`http://localhost:${p}/api/health`, { signal: AbortSignal.timeout(500) });
@@ -114,7 +136,7 @@ export class CodeRunnerService {
       return;
     }
 
-    const ws = new WebSocket(`ws://localhost:${this.detectedPort}`);
+    const ws = new WebSocket(this.wsUrl());
 
     ws.onopen = () => {
       this.updateSession(idx, { connected: true, ws });
@@ -255,9 +277,8 @@ export class CodeRunnerService {
       // Try detecting again
       await this.detectPort();
     }
-    const port = this.detectedPort || this.basePort;
     try {
-      const res = await fetch(`http://localhost:${port}/api/find-folder?name=${encodeURIComponent(folderName)}`);
+      const res = await fetch(`${this.httpBase()}/api/find-folder?name=${encodeURIComponent(folderName)}`);
       const data = await res.json();
       if (data.path) {
         // cd the first terminal

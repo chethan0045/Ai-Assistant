@@ -8,8 +8,10 @@ async function getPipeline() {
   if (!pipelinePromise) {
     pipelinePromise = (async () => {
       const { pipeline, env } = await import('@xenova/transformers');
-      // Cache model weights inside the backend dir so re-runs don't re-download.
-      env.cacheDir = require('path').join(__dirname, '..', '.models-cache');
+      // Cache model weights so re-runs don't re-download the ~25 MB model.
+      // On Render the filesystem is ephemeral, so set MODELS_CACHE_DIR to a
+      // mounted persistent disk (e.g. /var/models-cache) to survive restarts.
+      env.cacheDir = process.env.MODELS_CACHE_DIR || require('path').join(__dirname, '..', '.models-cache');
       env.allowLocalModels = true;
       return pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
     })();
