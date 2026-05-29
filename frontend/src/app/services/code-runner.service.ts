@@ -60,6 +60,8 @@ export class CodeRunnerService {
   private nextId = 1;
   private basePort = 4100;
   private detectedPort = 0; // 0 = not yet found
+  /** Resolved disk path of the open project; new terminals start here. */
+  private projectCwd = '';
   private resolveStep: (() => void) | null = null;
   private abortController: AbortController | null = null;
   private originalConsole = { log: console.log, warn: console.warn, error: console.error, info: console.info };
@@ -107,12 +109,28 @@ export class CodeRunnerService {
 
   // ===== SESSION MANAGEMENT =====
 
+  /**
+   * Set the open project's disk path. New terminals start here, and any
+   * already-connected terminal is cd'd into it immediately. Call this when a
+   * project folder is opened/resolved.
+   */
+  setProjectCwd(cwdPath: string): void {
+    if (!cwdPath) return;
+    this.projectCwd = cwdPath;
+    this.sessions().forEach((s, idx) => {
+      this.updateSession(idx, { cwd: cwdPath });
+      if (s.ws && s.ws.readyState === WebSocket.OPEN) {
+        s.ws.send(JSON.stringify({ type: 'cd', data: cwdPath }));
+      }
+    });
+  }
+
   createSession(initialCwd?: string): TerminalSession {
     const session: TerminalSession = {
       id: this.nextId++,
       name: '',
       lines: [],
-      cwd: initialCwd || '',
+      cwd: initialCwd || this.projectCwd || '',
       connected: false,
       commandRunning: false,
       ws: null,
@@ -271,7 +289,7 @@ export class CodeRunnerService {
     this.clearSessionLines(this.activeIdx());
   }
 
-  /** Find a project folder and cd the FIRST terminal into it */
+  /** Find a project folder on disk and cd every terminal into it. */
   async cdToProjectByName(folderName: string): Promise<string | null> {
     if (!this.detectedPort) {
       // Try detecting again
@@ -281,12 +299,8 @@ export class CodeRunnerService {
       const res = await fetch(`${this.httpBase()}/api/find-folder?name=${encodeURIComponent(folderName)}`);
       const data = await res.json();
       if (data.path) {
-        // cd the first terminal
-        const session = this.sessions()[0];
-        if (session?.ws?.readyState === WebSocket.OPEN) {
-          session.ws.send(JSON.stringify({ type: 'cd', data: data.path }));
-        }
-        this.updateSession(0, { cwd: data.path });
+        // cd all terminals (now + any opened later) into the resolved path.
+        this.setProjectCwd(data.path);
         return data.path;
       }
     } catch {}

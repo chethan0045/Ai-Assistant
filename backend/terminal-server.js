@@ -1457,15 +1457,26 @@ app.get('/api/find-folder', (req, res) => {
   if (!name) return res.status(400).json({ error: 'name required' });
 
   const lower = name.toLowerCase();
+  const home = os.homedir();
 
-  // Priority 1: direct children of common locations
+  // Priority 1: direct children of common project locations (incl. Downloads
+  // and OneDrive-redirected folders, which are where most projects actually live).
   const priority = [
-    os.homedir(),
-    path.join(os.homedir(), 'Desktop'),
-    path.join(os.homedir(), 'Documents'),
-    path.join(os.homedir(), 'Projects'),
-    path.join(os.homedir(), 'source'),
-    path.join(os.homedir(), 'repos'),
+    home,
+    path.join(home, 'Desktop'),
+    path.join(home, 'Documents'),
+    path.join(home, 'Downloads'),
+    path.join(home, 'OneDrive'),
+    path.join(home, 'OneDrive', 'Desktop'),
+    path.join(home, 'OneDrive', 'Documents'),
+    path.join(home, 'Projects'),
+    path.join(home, 'projects'),
+    path.join(home, 'source'),
+    path.join(home, 'source', 'repos'),
+    path.join(home, 'repos'),
+    path.join(home, 'dev'),
+    path.join(home, 'code'),
+    path.join(home, 'workspace'),
   ];
 
   // Add all drive roots
@@ -1482,18 +1493,44 @@ app.get('/api/find-folder', (req, res) => {
     } catch {}
   }
 
-  // Priority 2: search 2 levels deep on each drive
+  // Priority 2: breadth-first search under the home dir (where projects usually
+  // live), up to 5 levels deep, skipping heavy/system dirs. Returns the
+  // shallowest match, which avoids accidentally picking a nested duplicate.
+  const SKIP = new Set(['node_modules', '.git', '.cache', 'AppData', '.vscode', '.idea', 'dist', 'build', '$Recycle.Bin']);
+  const bfsFind = (root, maxDepth) => {
+    let queue = [{ dir: root, depth: 0 }];
+    while (queue.length) {
+      const { dir, depth } = queue.shift();
+      let entries;
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { continue; }
+      for (const e of entries) {
+        if (!e.isDirectory() || SKIP.has(e.name) || e.name.startsWith('$')) continue;
+        if (e.name.toLowerCase() === lower) return path.join(dir, e.name);
+      }
+      if (depth < maxDepth) {
+        for (const e of entries) {
+          if (e.isDirectory() && !SKIP.has(e.name) && !e.name.startsWith('$')) {
+            queue.push({ dir: path.join(dir, e.name), depth: depth + 1 });
+          }
+        }
+      }
+    }
+    return null;
+  };
+
+  const homeMatch = bfsFind(home, 5);
+  if (homeMatch) return res.json({ path: homeMatch });
+
+  // Priority 3: shallow search (2 levels) across other drive roots.
   for (const letter of 'CDEFGH') {
     const drive = letter + ':\\';
     try {
       const l1 = fs.readdirSync(drive, { withFileTypes: true });
       for (const d1 of l1) {
         if (!d1.isDirectory()) continue;
-        // Check direct match
         if (d1.name.toLowerCase() === lower) {
           return res.json({ path: path.join(drive, d1.name) });
         }
-        // Check children
         try {
           const l2path = path.join(drive, d1.name);
           const l2 = fs.readdirSync(l2path, { withFileTypes: true });
