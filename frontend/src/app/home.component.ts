@@ -302,6 +302,10 @@ export class HomeComponent {
       const res = await this.auth.register(this.name, this.email, this.password);
       if (res.error) {
         this.error = res.error;
+      } else if (res.token) {
+        // Verification disabled — registered and logged in directly.
+        this.success = 'Registration successful! Redirecting...';
+        setTimeout(() => this.router.navigate(['/scanner']), 600);
       } else {
         this.success = 'OTP sent to your email!';
         this.mode = 'otp';

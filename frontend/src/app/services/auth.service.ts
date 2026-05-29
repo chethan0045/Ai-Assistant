@@ -74,7 +74,12 @@ export class AuthService {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name, email, password }),
     });
-    return res.json();
+    const data: AuthResponse = await res.json();
+    // When email verification is disabled, the backend logs the user in directly.
+    if (data.token && data.user) {
+      this.saveToStorage(data.token, data.user);
+    }
+    return data;
   }
 
   async verifyOTP(email: string, otp: string): Promise<AuthResponse> {

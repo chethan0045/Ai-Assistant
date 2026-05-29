@@ -7,8 +7,21 @@ const { sendOTPEmail } = require('../services/mailer');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'ai-app-secret-key-2024';
 
+// Email OTP verification is OFF by default so registration works without an
+// email provider (Render blocks SMTP). Set REQUIRE_EMAIL_VERIFICATION=true once
+// an email provider (e.g. RESEND_API_KEY) is configured to re-enable the OTP step.
+const REQUIRE_EMAIL_VERIFICATION = process.env.REQUIRE_EMAIL_VERIFICATION === 'true';
+
 function generateOTP() {
   return Math.floor(100000 + Math.random() * 900000).toString();
+}
+
+function signToken(user) {
+  return jwt.sign(
+    { userId: user._id, name: user.name, email: user.email },
+    JWT_SECRET,
+    { expiresIn: '7d' }
+  );
 }
 
 // ===== REGISTER =====
@@ -31,6 +44,8 @@ router.post('/register', async (req, res) => {
     const hashed = await bcrypt.hash(password, 10);
     const otp = generateOTP();
     const otpExpiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 min
+    // When verification is disabled, mark the account verified immediately.
+    const verified = !REQUIRE_EMAIL_VERIFICATION;
 
     let user;
     if (existing && !existing.verified) {
@@ -38,6 +53,7 @@ router.post('/register', async (req, res) => {
       existing.password = hashed;
       existing.otp = otp;
       existing.otpExpiresAt = otpExpiresAt;
+      existing.verified = verified;
       user = await existing.save();
     } else {
       user = await User.create({
@@ -46,6 +62,17 @@ router.post('/register', async (req, res) => {
         password: hashed,
         otp,
         otpExpiresAt,
+        verified,
+      });
+    }
+
+    // No-verification path: log the user straight in with a JWT.
+    if (!REQUIRE_EMAIL_VERIFICATION) {
+      return res.json({
+        message: 'Registration successful.',
+        token: signToken(user),
+        user: { name: user.name, email: user.email },
+        requiresVerification: false,
       });
     }
 
