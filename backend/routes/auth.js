@@ -2,45 +2,13 @@ const express = require('express');
 const router = express.Router();
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const nodemailer = require('nodemailer');
 const User = require('../models/User');
+const { sendOTPEmail } = require('../services/mailer');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'ai-app-secret-key-2024';
 
-// Gmail transporter for OTP
-const transporter = nodemailer.createTransport({
-  service: 'gmail',
-  auth: {
-    user: 'chethanrohit0045@gmail.com',
-    pass: 'apbpwslaxslxagbv',
-  },
-});
-
 function generateOTP() {
   return Math.floor(100000 + Math.random() * 900000).toString();
-}
-
-async function sendOTPEmail(email, otp, name) {
-  const mailOptions = {
-    from: '"AI App" <chethanrohit0045@gmail.com>',
-    to: email,
-    subject: 'AI - Email Verification OTP',
-    html: `
-      <div style="font-family:Arial,sans-serif;max-width:480px;margin:0 auto;padding:32px;background:#0f172a;border-radius:16px;color:#e2e8f0;">
-        <h1 style="color:#818cf8;margin:0 0 8px;">AI</h1>
-        <p style="margin:0 0 24px;color:#94a3b8;">Email Verification</p>
-        <p>Hello <strong>${name}</strong>,</p>
-        <p>Your verification code is:</p>
-        <div style="text-align:center;margin:24px 0;">
-          <span style="display:inline-block;padding:16px 32px;background:linear-gradient(135deg,#6366f1,#8b5cf6);border-radius:12px;font-size:32px;font-weight:bold;letter-spacing:8px;color:#fff;">${otp}</span>
-        </div>
-        <p style="color:#94a3b8;font-size:13px;">This code expires in <strong>10 minutes</strong>. Do not share it with anyone.</p>
-        <hr style="border:none;border-top:1px solid #1e293b;margin:24px 0;">
-        <p style="color:#64748b;font-size:12px;text-align:center;">AI - Your Intelligent Code Assistant</p>
-      </div>
-    `,
-  };
-  return transporter.sendMail(mailOptions);
 }
 
 // ===== REGISTER =====
@@ -81,7 +49,15 @@ router.post('/register', async (req, res) => {
       });
     }
 
-    await sendOTPEmail(email, otp, name);
+    try {
+      await sendOTPEmail(email, otp, name);
+    } catch (mailErr) {
+      console.error('OTP email send failed:', mailErr);
+      return res.status(502).json({
+        error: 'Could not send the verification email. Please try again shortly.',
+        emailError: true,
+      });
+    }
 
     res.json({
       message: 'Registration successful. OTP sent to your email.',
