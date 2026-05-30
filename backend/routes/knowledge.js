@@ -648,7 +648,7 @@ router.post('/generate-code-rag', async (req, res) => {
         generated: '',
         retrieved,
         fallback: 'no_api_key',
-        message: 'DeepSeek API key not set. Set DEEPSEEK_API_KEY env var or POST /api/ai/set-key to enable generation. Until then, use /generate-code-semantic for pure retrieval.',
+        message: 'No LLM API key set. Set GEMINI_API_KEY (https://aistudio.google.com/app/apikey) or DEEPSEEK_API_KEY, or POST /api/ai/set-key to enable generation. Until then, use /generate-code-semantic for pure retrieval.',
       });
     }
 
