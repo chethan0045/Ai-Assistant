@@ -1362,20 +1362,47 @@ app.all('/api/ai-module/*', (req, res) => {
   res.json({ error: 'External AI module disabled. Assistant runs independently using local knowledge base.' });
 });
 
-// ===== AI (local only — no external providers) =====
+// ===== AI (offline-first KB; optional Gemini/DeepSeek fallback via cloud-ai.service) =====
 try { require('dotenv').config(); } catch {}
+const { CloudAIService } = require('./cloud-ai.service');
+const cloudAI = new CloudAIService();
 
-app.get('/api/ai/status', (req, res) => res.json({ provider: 'local', ready: true }));
+app.get('/api/ai/status', (req, res) => res.json(cloudAI.getStatus()));
 
 app.post('/api/ai/key', (req, res) => {
-  res.json({ success: true, note: 'External AI providers removed — assistant runs locally' });
+  const { key, provider } = req.body || {};
+  if (!key) return res.status(400).json({ error: 'key required' });
+  try { cloudAI.setApiKey(key, provider); res.json({ success: true, status: cloudAI.getStatus() }); }
+  catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Non-streaming ask — used by the IDE chat as a fallback when the local KB has no answer.
+// Offline-first: returns { ready:false } when no API key is configured, so the client keeps
+// its local fallback message instead of erroring.
+app.post('/api/ai/ask', async (req, res) => {
+  try {
+    const { message, projectContext, history, currentFile } = req.body || {};
+    if (!message) return res.status(400).json({ error: 'message required' });
+    if (!cloudAI.getStatus().ready) return res.json({ ready: false, answer: null });
+    const messages = cloudAI.buildMessages(message, projectContext, history, currentFile);
+    const answer = await cloudAI.complete(messages, { maxTokens: 4096 });
+    res.json({ ready: true, answer, provider: cloudAI.provider, model: cloudAI.model });
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
 });
 
 app.post('/api/ai/chat/stream', async (req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive', 'Access-Control-Allow-Origin': '*' });
-  res.write(`data: ${JSON.stringify({ token: 'AI runs locally via the knowledge base. No external API is used.' })}\n\n`);
-  res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
-  res.end();
+  if (!cloudAI.getStatus().ready) {
+    res.write(`data: ${JSON.stringify({ token: 'AI runs locally via the knowledge base. Set GEMINI_API_KEY to enable cloud answers.' })}\n\n`);
+    res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
+    return res.end();
+  }
+  const { message, projectContext, history, currentFile, model } = req.body || {};
+  const messages = cloudAI.buildMessages(message || '', projectContext, history, currentFile);
+  try { await cloudAI.streamChat(messages, model, res); }
+  catch { try { res.end(); } catch {} }
 });
 
 // REST: health check

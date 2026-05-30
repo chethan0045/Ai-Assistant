@@ -2659,6 +2659,29 @@ app.listen(process.env.PORT || 3000, () => {
       };
     }
 
+    // 3.5 KB fully missed — try the cloud LLM (Gemini) if the backend has a key configured.
+    // Offline-first is preserved: this only runs after every local/KB source has missed,
+    // and silently falls through to the local fallback when offline or no key is set.
+    try {
+      const resp = await fetch(`${this.fs.getBackendUrl()}/api/ai/ask`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: input }),
+      });
+      if (resp.ok) {
+        const data = await resp.json();
+        if (data && data.ready && data.answer) {
+          const memories = await memoryPromise;
+          return {
+            id: '', role: 'ai',
+            text: this.attachMemoryContext(data.answer, memories),
+            timestamp: new Date(),
+            steps: [{ label: 'Source', status: 'done', detail: `${data.provider || 'cloud'}${data.model ? ' · ' + data.model : ''}` }],
+          };
+        }
+      }
+    } catch { /* network/offline — fall through to local fallback */ }
+
     // 4. All missed — return local fallback (has helpful suggestions)
     const memories = await memoryPromise;
     return {
