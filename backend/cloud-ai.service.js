@@ -27,23 +27,29 @@ class CloudAIService {
   // --- provider resolution -------------------------------------------------
 
   _geminiKey() { return process.env.GEMINI_API_KEY || ''; }
+  _openrouterKey() { return process.env.OPENROUTER_API_KEY || ''; }
   _deepseekKey() { return process.env.DEEPSEEK_API_KEY || ''; }
 
-  /** Active provider: gemini wins when its key is present, else deepseek. */
+  /** Active provider, in preference order: gemini, then openrouter, then deepseek. */
   get provider() {
-    return this._geminiKey() ? 'gemini' : 'deepseek';
+    if (this._geminiKey()) return 'gemini';
+    if (this._openrouterKey()) return 'openrouter';
+    return 'deepseek';
   }
 
   /** Default model for the active provider. */
   get model() {
-    return this.provider === 'gemini'
-      ? (process.env.GEMINI_MODEL || 'gemini-flash-latest')
-      : 'deepseek-coder';
+    if (this.provider === 'gemini') return process.env.GEMINI_MODEL || 'gemini-flash-latest';
+    // OpenRouter free models end in ":free". Override with OPENROUTER_MODEL.
+    if (this.provider === 'openrouter') return process.env.OPENROUTER_MODEL || 'deepseek/deepseek-chat-v3.1:free';
+    return 'deepseek-coder';
   }
 
   /** True when the active provider has a usable key. */
   get apiKey() {
-    return this.provider === 'gemini' ? this._geminiKey() : this._deepseekKey();
+    if (this.provider === 'gemini') return this._geminiKey();
+    if (this.provider === 'openrouter') return this._openrouterKey();
+    return this._deepseekKey();
   }
 
   // --- key management ------------------------------------------------------
@@ -54,7 +60,9 @@ class CloudAIService {
    */
   setApiKey(key, provider) {
     const target = provider || this.provider;
-    const envVar = target === 'gemini' ? 'GEMINI_API_KEY' : 'DEEPSEEK_API_KEY';
+    const envVar = target === 'gemini' ? 'GEMINI_API_KEY'
+      : target === 'openrouter' ? 'OPENROUTER_API_KEY'
+      : 'DEEPSEEK_API_KEY';
     process.env[envVar] = key;
     const fs = require('fs');
     const path = require('path');
@@ -79,6 +87,8 @@ class CloudAIService {
       ready: !!this.apiKey,
       signupUrl: provider === 'gemini'
         ? 'https://aistudio.google.com/app/apikey'
+        : provider === 'openrouter'
+        ? 'https://openrouter.ai/keys'
         : 'https://platform.deepseek.com',
     };
   }
@@ -87,13 +97,46 @@ class CloudAIService {
 
   async streamChat(messages, model, res) {
     if (!this.apiKey) {
-      res.write(`data: ${JSON.stringify({ error: 'No LLM API key configured. Set GEMINI_API_KEY (https://aistudio.google.com/app/apikey) or DEEPSEEK_API_KEY.' })}\n\n`);
+      res.write(`data: ${JSON.stringify({ error: 'No LLM API key configured. Set GEMINI_API_KEY (https://aistudio.google.com/app/apikey), OPENROUTER_API_KEY (https://openrouter.ai/keys), or DEEPSEEK_API_KEY.' })}\n\n`);
       res.end();
       return;
     }
     return this.provider === 'gemini'
       ? this._streamGemini(messages, model, res)
       : this._streamDeepSeek(messages, model, res);
+  }
+
+  /**
+   * Request options for OpenAI-compatible providers (deepseek, openrouter).
+   * Both speak the same /chat/completions wire format, so the stream/complete
+   * bodies are shared — only host, path and auth headers differ.
+   */
+  _openAiRequestOptions(body) {
+    if (this.provider === 'openrouter') {
+      return {
+        hostname: 'openrouter.ai',
+        path: '/api/v1/chat/completions',
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${this.apiKey}`,
+          // Optional attribution headers OpenRouter uses for app ranking.
+          'HTTP-Referer': 'https://github.com/chethan0045/Ai-Assistant',
+          'X-Title': 'AI Assistant IDE',
+          'Content-Length': Buffer.byteLength(body),
+        },
+      };
+    }
+    return {
+      hostname: 'api.deepseek.com',
+      path: '/chat/completions',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${this.apiKey}`,
+        'Content-Length': Buffer.byteLength(body),
+      },
+    };
   }
 
   _streamDeepSeek(messages, model, res) {
@@ -104,24 +147,17 @@ class CloudAIService {
       temperature: 0.3,
       max_tokens: 4096,
     });
+    const providerLabel = this.provider === 'openrouter' ? 'OpenRouter' : 'DeepSeek';
 
     return new Promise((resolve, reject) => {
-      const req = https.request({
-        hostname: 'api.deepseek.com',
-        path: '/chat/completions',
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${this.apiKey}`,
-        },
-      }, (apiRes) => {
+      const req = https.request(this._openAiRequestOptions(body), (apiRes) => {
         let buffer = '';
 
         if (apiRes.statusCode !== 200) {
           let errData = '';
           apiRes.on('data', c => errData += c);
           apiRes.on('end', () => {
-            let errMsg = `DeepSeek API error ${apiRes.statusCode}`;
+            let errMsg = `${providerLabel} API error ${apiRes.statusCode}`;
             try { errMsg = JSON.parse(errData).error?.message || errMsg; } catch {}
             res.write(`data: ${JSON.stringify({ error: errMsg })}\n\n`);
             res.end();
@@ -257,22 +293,14 @@ class CloudAIService {
       temperature: opts.temperature ?? 0.3,
       max_tokens: opts.maxTokens ?? 2048,
     });
+    const providerLabel = this.provider === 'openrouter' ? 'OpenRouter' : 'DeepSeek';
     return new Promise((resolve, reject) => {
-      const req = https.request({
-        hostname: 'api.deepseek.com',
-        path: '/chat/completions',
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${this.apiKey}`,
-          'Content-Length': Buffer.byteLength(body),
-        },
-      }, (apiRes) => {
+      const req = https.request(this._openAiRequestOptions(body), (apiRes) => {
         let raw = '';
         apiRes.on('data', c => raw += c);
         apiRes.on('end', () => {
           if (apiRes.statusCode !== 200) {
-            let msg = `DeepSeek API error ${apiRes.statusCode}`;
+            let msg = `${providerLabel} API error ${apiRes.statusCode}`;
             try { msg = JSON.parse(raw).error?.message || msg; } catch {}
             return reject(new Error(msg));
           }
@@ -280,7 +308,7 @@ class CloudAIService {
             const parsed = JSON.parse(raw);
             resolve(parsed.choices?.[0]?.message?.content || '');
           } catch (err) {
-            reject(new Error('Invalid JSON from DeepSeek: ' + err.message));
+            reject(new Error('Invalid JSON from ' + providerLabel + ': ' + err.message));
           }
         });
       });
