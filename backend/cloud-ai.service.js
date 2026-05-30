@@ -182,10 +182,11 @@ class CloudAIService {
     return new Promise((resolve, reject) => {
       const req = https.request({
         hostname: 'generativelanguage.googleapis.com',
-        path: `/v1beta/models/${mdl}:streamGenerateContent?alt=sse&key=${this.apiKey}`,
+        path: `/v1beta/models/${mdl}:streamGenerateContent?alt=sse`,
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          'X-goog-api-key': this.apiKey,
           'Content-Length': Buffer.byteLength(body),
         },
       }, (apiRes) => {
@@ -309,10 +310,11 @@ class CloudAIService {
     return new Promise((resolve, reject) => {
       const req = https.request({
         hostname: 'generativelanguage.googleapis.com',
-        path: `/v1beta/models/${mdl}:generateContent?key=${this.apiKey}`,
+        path: `/v1beta/models/${mdl}:generateContent`,
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          'X-goog-api-key': this.apiKey,
           'Content-Length': Buffer.byteLength(body),
         },
       }, (apiRes) => {
